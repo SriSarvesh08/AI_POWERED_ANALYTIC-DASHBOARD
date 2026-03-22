@@ -117,14 +117,10 @@ class SupersetClient:
         """Create a Superset virtual dataset pointing to our warehouse table. Idempotent."""
         headers = await self._headers()
         
-        # Check if already exists using precise filter
-        q = json.dumps({
-            "filters": [
-                {"col": "table_name", "opr": "eq", "value": table_name},
-                {"col": "schema", "opr": "eq", "value": schema}
-            ]
-        })
-        resp = await self._get(f"/api/v1/dataset/?q={q}", headers=headers)
+        # Check if already exists using RISON filter (Superset 3.x requires RISON, not JSON)
+        q_rison = f"(filters:!((col:table_name,opr:eq,value:'{table_name}'),(col:schema,opr:eq,value:'{schema}')))"
+        resp = await self._client.get("/api/v1/dataset/", params={"q": q_rison}, headers=headers)
+        resp.raise_for_status()
         results = resp.json().get("result", [])
         if results:
             return results[0]["id"]
