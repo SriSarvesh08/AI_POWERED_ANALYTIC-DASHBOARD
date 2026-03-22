@@ -20,6 +20,7 @@ FEATURE_FLAGS = {
     "ENABLE_TEMPLATE_PROCESSING": True,
     "DASHBOARD_NATIVE_FILTERS": True,
     "DASHBOARD_CROSS_FILTERS": True,
+    "GENERIC_CHART_AXES": True,          # allow line/area charts with non-datetime x-axis
 }
 
 GUEST_ROLE_NAME = "Public"

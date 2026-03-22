@@ -447,9 +447,8 @@ async def _run(
             chart_params["metrics"] = []
             
         elif viz_type.startswith("echarts_timeseries"):
-            # ECharts time-series: needs granularity_sqla, time_grain, and metrics
-            chart_params["granularity_sqla"] = x_col
-            chart_params["time_grain_sqla"] = "P1D"
+            # ECharts time-series: use x_axis (GENERIC_CHART_AXES) — works with any column type
+            chart_params["x_axis"] = x_col
             chart_params["metrics"] = [metric_obj]
             chart_params["groupby"] = []  # no groupby for timeseries
             

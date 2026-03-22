@@ -123,30 +123,27 @@ class RAGEngine:
                     c_data = await self.superset.get_chart(target_chart.superset_chart_id)
                     params = json.loads(c_data.get("params", "{}"))
                     
-                    # Detect if dataset has a datetime column
-                    datetime_col = self._find_datetime_column(dataset)
+                    # Extract the current x-axis from existing chart params
+                    existing_x = None
+                    if params.get("groupby") and len(params["groupby"]) > 0:
+                        existing_x = params["groupby"][0]
+                    elif params.get("x_axis"):
+                        existing_x = params["x_axis"]
+                    elif params.get("granularity_sqla"):
+                        existing_x = params["granularity_sqla"]
                     
-                    # Smart viz type selection based on data capabilities
-                    if target_type in ("line", "area") and datetime_col:
-                        # ✅ Data HAS datetime → deliver a real line/area chart
-                        if target_type == "line":
-                            new_viz = "echarts_timeseries_line"
-                        else:
-                            new_viz = "echarts_timeseries"  # area
-                        
-                        # Configure time-series params
-                        params["granularity_sqla"] = datetime_col
-                        params["time_grain_sqla"] = "P1D"  # daily grain
+                    # With GENERIC_CHART_AXES enabled in Superset, line/area charts
+                    # work with ANY x-axis type using the 'x_axis' parameter.
+                    # No datetime column required!
+                    if target_type in ("line", "area"):
+                        new_viz = "echarts_timeseries_line" if target_type == "line" else "echarts_timeseries"
+                        # Use x_axis (generic axes) instead of granularity_sqla
+                        params["x_axis"] = existing_x
+                        params.pop("granularity_sqla", None)
+                        params.pop("time_grain_sqla", None)
                         params["groupby"] = []
-                        # Remove categorical groupby if present (conflicts with timeseries)
                         params.pop("columns", None)
-                        
-                    elif target_type in ("line", "area") and not datetime_col:
-                        # ❌ No datetime → fall back to categorical bar
-                        new_viz = "dist_bar"
-                        
                     else:
-                        # All other types: bar, pie, scatter, table, big_number
                         viz_map = {
                             "bar": "dist_bar",
                             "pie": "pie",
@@ -155,6 +152,10 @@ class RAGEngine:
                             "big_number": "big_number_total",
                         }
                         new_viz = viz_map.get(target_type, "dist_bar")
+                        # For bar/pie, restore groupby
+                        if new_viz in ("dist_bar", "pie") and existing_x:
+                            params["groupby"] = [existing_x]
+                            params.pop("x_axis", None)
                     
                     params["viz_type"] = new_viz
                     
@@ -171,6 +172,17 @@ class RAGEngine:
                                     m["label"] = f"Count of {col_match}"
                                     logger.warning(f"Sanitized metric: changed aggregation to COUNT for non-numeric column '{col_match}'")
                     
+                    # Also sanitize the 'metric' key (singular, used by pie/big_number)
+                    single_metric = params.get("metric")
+                    if isinstance(single_metric, dict) and "sqlExpression" in single_metric:
+                        expr = single_metric["sqlExpression"].upper()
+                        if any(expr.startswith(agg) for agg in ["AVG(", "SUM(", "MIN(", "MAX("]):
+                            col_match = expr.split('(', 1)[1].rstrip(')').strip().strip('"')
+                            if not self._is_column_numeric(dataset, col_match):
+                                orig_col = single_metric["sqlExpression"].split('(', 1)[1].rstrip(')')
+                                single_metric["sqlExpression"] = f"COUNT({orig_col})"
+                                single_metric["label"] = f"Count of {col_match}"
+                    
                     await self.superset.update_chart(
                         target_chart.superset_chart_id, 
                         {"viz_type": new_viz, "params": json.dumps(params)}
@@ -181,13 +193,7 @@ class RAGEngine:
                     
                     new_chart_id = target_chart.superset_chart_id
                     
-                    # Build user-friendly response
-                    if target_type in ("line", "area") and datetime_col:
-                        answer = f"Done! I've changed '{target_chart.title}' to a **{target_type} chart** using `{datetime_col}` as the time axis. The visualization has been updated on your dashboard."
-                    elif target_type in ("line", "area") and not datetime_col:
-                        answer = f"Your data doesn't have a datetime column, so I've displayed '{target_chart.title}' as a **bar chart** instead. To get a line chart, your data needs a date/time column."
-                    else:
-                        answer = f"Done! I've changed '{target_chart.title}' to a **{target_type} chart**. The visualization has been updated on your dashboard."
+                    answer = f"Done! I've changed '{target_chart.title}' to a **{target_type} chart**. The visualization has been updated on your dashboard."
                     
                     chart_modification = {
                         "target_title": target_chart.title,
@@ -269,9 +275,8 @@ class RAGEngine:
                             chart_params = {"viz_type": ss_viz, "adhoc_filters": [], "row_limit": 1000, "color_scheme": "supersetColors"}
 
                             if ss_viz.startswith("echarts_timeseries"):
-                                # Time-series line/area
-                                chart_params["granularity_sqla"] = datetime_col
-                                chart_params["time_grain_sqla"] = "P1D"
+                                # Use x_axis (GENERIC_CHART_AXES) — works with any column type
+                                chart_params["x_axis"] = x_col_r
                                 chart_params["metrics"] = [metric_obj]
                                 chart_params["groupby"] = []
                             elif ss_viz == "dist_bar":
