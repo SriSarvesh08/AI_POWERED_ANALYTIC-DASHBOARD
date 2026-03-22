@@ -434,30 +434,43 @@ class RAGEngine:
                 matched_title = None
                 best_score = 0
                 
-                # Words to ignore when matching (too common in chart titles)
+                # Words to ignore: only structural words, NOT content words
+                # Keep "average", "total", "top", "app", "age" etc — they appear in titles!
                 stop_words = {
-                    "chart", "graph", "the", "and", "for", "by", "of", "in",
-                    "on", "at", "to", "a", "an", "vs", "versus", "it", "this",
-                    "average", "total", "distribution", "comparison",
+                    "chart", "graph", "plot", "the", "and", "for", "it", "this",
+                    "into", "change", "convert", "switch", "make", "turn",
+                    "to", "a", "an", "as", "is", "my",
                 }
                 
-                # Extract meaningful words from the user message (skip chart type words + stop words)
+                # Extract meaningful words from the user message
                 chart_type_words = {"bar", "line", "pie", "scatter", "area", "table"}
                 msg_words = set(
                     w.lower() for w in lower.split()
-                    if len(w) > 3 and w.lower() not in stop_words and w.lower() not in chart_type_words
+                    if len(w) > 1 and w.lower() not in stop_words and w.lower() not in chart_type_words
                 )
                 
-                if chart_titles and msg_words:
+                if chart_titles:
+                    # Method 1: Check if any chart title appears as a substring
                     for title in chart_titles:
-                        title_words = set(w.lower() for w in title.split() if len(w) > 3 and w.lower() not in stop_words)
-                        score = len(msg_words & title_words)
-                        if score > best_score:
-                            best_score = score
+                        if title.lower() in lower:
                             matched_title = title
+                            best_score = 999  # exact substring match — highest priority
+                            break
+                    
+                    # Method 2: Word overlap scoring (only if no substring match)
+                    if best_score < 999 and msg_words:
+                        for title in chart_titles:
+                            title_words = set(
+                                w.lower() for w in title.split()
+                                if len(w) > 1 and w.lower() not in stop_words
+                            )
+                            score = len(msg_words & title_words)
+                            if score > best_score:
+                                best_score = score
+                                matched_title = title
                 
-                # Only accept the match if at least 2 meaningful words overlap
-                if best_score < 2:
+                # Accept match if at least 1 meaningful word overlaps
+                if best_score < 1:
                     matched_title = None
 
                 return {
