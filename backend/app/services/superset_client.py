@@ -118,12 +118,21 @@ class SupersetClient:
         headers = await self._headers()
         
         # Check if already exists using RISON filter (Superset 3.x requires RISON, not JSON)
-        q_rison = f"(filters:!((col:table_name,opr:eq,value:'{table_name}'),(col:schema,opr:eq,value:'{schema}')))"
-        resp = await self._client.get("/api/v1/dataset/", params={"q": q_rison}, headers=headers)
-        resp.raise_for_status()
-        results = resp.json().get("result", [])
-        if results:
-            return results[0]["id"]
+        # We uniquely identify the dataset by its table_name (which is a UUID in our system).
+        # We omit 'schema' from the filter to prevent 422 UNPROCESSABLE ENTITY errors from FAB.
+        q_rison = f"(filters:!((col:table_name,opr:eq,value:'{table_name}')))"
+        
+        try:
+            resp = await self._client.get("/api/v1/dataset/", params={"q": q_rison}, headers=headers)
+            resp.raise_for_status()
+            results = resp.json().get("result", [])
+            if results:
+                return results[0]["id"]
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 422:
+                logger.warning(f"Dataset GET filter threw 422. Proceeding to create. Details: {e.response.text}")
+            else:
+                raise
 
         try:
             resp = await self._post("/api/v1/dataset/", headers=headers, json={
