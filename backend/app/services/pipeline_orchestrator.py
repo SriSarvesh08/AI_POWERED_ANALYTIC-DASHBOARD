@@ -335,6 +335,28 @@ async def _run(
             y_type = str(target_col_info.get("type", "")).upper()
             if any(kw in y_type for kw in ["INT", "FLOAT", "DECIMAL", "NUMERIC", "DOUBLE", "REAL", "BIGINT"]):
                 is_y_numeric = True
+        
+        # EXTRA SAFETY: Verify against actual PostgreSQL column type.
+        # The schema may say "numeric" but Postgres may store it as TEXT.
+        if is_y_numeric and y_col and table_ref:
+            try:
+                from sqlalchemy import create_engine, text as sa_text
+                wh_uri = settings.DATABASE_URL.replace("+asyncpg", "+psycopg2")
+                eng = create_engine(wh_uri)
+                with eng.connect() as conn:
+                    result = conn.execute(sa_text(
+                        "SELECT data_type FROM information_schema.columns "
+                        "WHERE table_name = :tbl AND column_name = :col"
+                    ), {"tbl": table_ref, "col": y_col})
+                    row = result.fetchone()
+                    if row:
+                        pg_type = str(row[0]).upper()
+                        if any(kw in pg_type for kw in ["TEXT", "VARCHAR", "CHARACTER", "CHAR"]):
+                            logger.warning(f"Schema says '{y_col}' is numeric, but Postgres type is '{row[0]}'. Overriding to non-numeric.")
+                            is_y_numeric = False
+                eng.dispose()
+            except Exception as e:
+                logger.warning(f"Could not verify Postgres column type for '{y_col}': {e}")
 
         # --- Smart Viz Selection ---
         # Use CATEGORICAL chart types by default (they don't need datetime).
@@ -354,7 +376,6 @@ async def _run(
             }
         else:
             # Non-date X axis → use categorical variants that NEVER need datetime
-            # Superset 'line' and 'area' ALWAYS require datetime. Force them to 'dist_bar'.
             type_map = {
                 "bar": "dist_bar",
                 "line": "dist_bar",
