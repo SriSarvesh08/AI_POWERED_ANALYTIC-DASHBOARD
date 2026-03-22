@@ -27,6 +27,20 @@ class RAGEngine:
         self.gemini = GeminiService()
         self.superset = SupersetClient()
 
+    def _is_column_numeric(self, dataset, col_name: str) -> bool:
+        """Check if a column is numeric by inspecting the dataset's raw_schema."""
+        s = dataset.raw_schema or {}
+        cols = []
+        for t in s.get("tables", []):
+            cols.extend(t.get("columns", []))
+        cols.extend(s.get("columns", []))
+        for c in cols:
+            nm = c.get("name", c.get("column_name", ""))
+            if nm.upper() == col_name.upper():
+                ct = str(c.get("type", c.get("data_type", c.get("dtype", "")))).upper()
+                return any(k in ct for k in ["INT", "FLOAT", "DECIMAL", "NUMERIC", "DOUBLE", "REAL", "BIGINT", "NUMBER"])
+        return False
+
     # ── Main query handler ────────────────────────────────────────────────────
 
     async def query(
@@ -93,20 +107,40 @@ class RAGEngine:
                     c_data = await self.superset.get_chart(target_chart.superset_chart_id)
                     params = json.loads(c_data.get("params", "{}"))
                     
+                    # IMPORTANT: Superset's classic 'line' and 'area' viz types ALWAYS
+                    # require a datetime column. Map them to 'dist_bar' (categorical bar)
+                    # which works with any axis type.
                     viz_map = {
                         "bar": "dist_bar",
-                        "line": "line",
-                        "area": "area",
+                        "line": "dist_bar",      # line requires datetime → use bar
+                        "area": "dist_bar",      # area requires datetime → use bar
                         "pie": "pie",
                         "scatter": "echarts_scatter",
                         "table": "table",
                         "big_number": "big_number_total",
                     }
-                    params["viz_type"] = viz_map.get(target_type, "dist_bar")
+                    new_viz = viz_map.get(target_type, "dist_bar")
+                    params["viz_type"] = new_viz
+                    
+                    # Sanitize existing metrics — prevent AVG/SUM on text columns
+                    metrics = params.get("metrics", [])
+                    for i, m in enumerate(metrics):
+                        if isinstance(m, dict) and "sqlExpression" in m:
+                            expr = m["sqlExpression"].upper()
+                            # If it uses AVG/SUM/MIN/MAX, check if column is numeric
+                            if any(expr.startswith(agg) for agg in ["AVG(", "SUM(", "MIN(", "MAX("]):
+                                # Extract column name from expression like AVG("col")
+                                col_match = expr.split('(', 1)[1].rstrip(')').strip().strip('"')
+                                if not self._is_column_numeric(dataset, col_match):
+                                    # Fall back to COUNT for non-numeric columns
+                                    orig_col = m["sqlExpression"].split('(', 1)[1].rstrip(')')
+                                    m["sqlExpression"] = f"COUNT({orig_col})"
+                                    m["label"] = f"Count of {col_match}"
+                                    logger.warning(f"Sanitized metric: changed aggregation to COUNT for non-numeric column '{col_match}'")
                     
                     await self.superset.update_chart(
                         target_chart.superset_chart_id, 
-                        {"viz_type": params["viz_type"], "params": json.dumps(params)}
+                        {"viz_type": new_viz, "params": json.dumps(params)}
                     )
                     
                     target_chart.chart_type = target_type
@@ -115,12 +149,16 @@ class RAGEngine:
                     # Frontend uses new_chart_id to reload the dashboard iframe
                     new_chart_id = target_chart.superset_chart_id
                     
+                    display_type = "bar" if target_type in ("line", "area") else target_type
                     chart_modification = {
                         "target_title": target_chart.title,
-                        "new_type": target_type,
+                        "new_type": display_type,
                     }
                     
-                    answer = f"Done! I've changed '{target_chart.title}' to a **{target_type} chart**. The visualization has been updated on your dashboard."
+                    note = ""
+                    if target_type in ("line", "area"):
+                        note = " (displayed as bar chart because your data doesn't have a datetime axis)"
+                    answer = f"Done! I've changed '{target_chart.title}' to a **{display_type} chart**{note}. The visualization has been updated on your dashboard."
                     return ChatResponse(
                         answer=answer,
                         chart_modification=chart_modification,
@@ -331,10 +369,10 @@ class RAGEngine:
         ]
         chart_type_map = {
             "bar": "bar", "bar chart": "bar", "bar graph": "bar",
-            "line": "line", "line chart": "line", "line graph": "line",
+            "line": "bar", "line chart": "bar", "line graph": "bar",   # line needs datetime → force bar
             "pie": "pie", "pie chart": "pie", "donut": "doughnut", "doughnut": "doughnut",
             "scatter": "scatter", "scatter plot": "scatter", "scatter chart": "scatter",
-            "area": "line", "area chart": "line",
+            "area": "bar", "area chart": "bar",                       # area needs datetime → force bar
             "table": "table",
         }
 
