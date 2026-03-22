@@ -224,17 +224,19 @@ class SupersetClient:
         resp.raise_for_status()
         dashboard_id = resp.json()["id"]
 
-        # Step 2: Update with layout (using correct 'position_json' field)
-        position_data = self._build_layout(chart_ids)
-        await self._put(f"/api/v1/dashboard/{dashboard_id}", headers=headers, json={
-            "position_json": json.dumps(position_data),
-            "json_metadata": "{}"
-        })
+        # Step 2: Update with layout
+        try:
+            position_data = self._build_layout(chart_ids)
+            await self._put(f"/api/v1/dashboard/{dashboard_id}", headers=headers, json={
+                "position_json": json.dumps(position_data),
+            })
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"Dashboard layout update returned {e.response.status_code}: {e.response.text}")
+            # Dashboard was already created — continue even if layout fails
 
-        # Step 3: Link charts to dashboard (since 'slices' field is Unknown in PUT)
+        # Step 3: Link charts to dashboard
         for chart_id in chart_ids:
             try:
-                # Add this dashboard to the chart's list of dashboards
                 chart_data = await self.get_chart(chart_id)
                 current_dashboards = [d["id"] for d in chart_data.get("dashboards", [])]
                 if dashboard_id not in current_dashboards:
