@@ -41,6 +41,22 @@ class RAGEngine:
                 return any(k in ct for k in ["INT", "FLOAT", "DECIMAL", "NUMERIC", "DOUBLE", "REAL", "BIGINT", "NUMBER"])
         return False
 
+    def _find_datetime_column(self, dataset) -> str | None:
+        """
+        Scan the dataset's raw_schema for the first DATE/TIMESTAMP/DATETIME column.
+        Returns the column name if found, None otherwise.
+        """
+        s = dataset.raw_schema or {}
+        cols = []
+        for t in s.get("tables", []):
+            cols.extend(t.get("columns", []))
+        cols.extend(s.get("columns", []))
+        for c in cols:
+            ct = str(c.get("type", c.get("data_type", c.get("dtype", "")))).upper()
+            if any(kw in ct for kw in ["DATETIME", "TIMESTAMP", "DATE", "TIME"]):
+                return c.get("name", c.get("column_name"))
+        return None
+
     # ── Main query handler ────────────────────────────────────────────────────
 
     async def query(
@@ -107,19 +123,39 @@ class RAGEngine:
                     c_data = await self.superset.get_chart(target_chart.superset_chart_id)
                     params = json.loads(c_data.get("params", "{}"))
                     
-                    # IMPORTANT: Superset's classic 'line' and 'area' viz types ALWAYS
-                    # require a datetime column. Map them to 'dist_bar' (categorical bar)
-                    # which works with any axis type.
-                    viz_map = {
-                        "bar": "dist_bar",
-                        "line": "dist_bar",      # line requires datetime → use bar
-                        "area": "dist_bar",      # area requires datetime → use bar
-                        "pie": "pie",
-                        "scatter": "echarts_scatter",
-                        "table": "table",
-                        "big_number": "big_number_total",
-                    }
-                    new_viz = viz_map.get(target_type, "dist_bar")
+                    # Detect if dataset has a datetime column
+                    datetime_col = self._find_datetime_column(dataset)
+                    
+                    # Smart viz type selection based on data capabilities
+                    if target_type in ("line", "area") and datetime_col:
+                        # ✅ Data HAS datetime → deliver a real line/area chart
+                        if target_type == "line":
+                            new_viz = "echarts_timeseries_line"
+                        else:
+                            new_viz = "echarts_timeseries"  # area
+                        
+                        # Configure time-series params
+                        params["granularity_sqla"] = datetime_col
+                        params["time_grain_sqla"] = "P1D"  # daily grain
+                        params["groupby"] = []
+                        # Remove categorical groupby if present (conflicts with timeseries)
+                        params.pop("columns", None)
+                        
+                    elif target_type in ("line", "area") and not datetime_col:
+                        # ❌ No datetime → fall back to categorical bar
+                        new_viz = "dist_bar"
+                        
+                    else:
+                        # All other types: bar, pie, scatter, table, big_number
+                        viz_map = {
+                            "bar": "dist_bar",
+                            "pie": "pie",
+                            "scatter": "echarts_scatter",
+                            "table": "table",
+                            "big_number": "big_number_total",
+                        }
+                        new_viz = viz_map.get(target_type, "dist_bar")
+                    
                     params["viz_type"] = new_viz
                     
                     # Sanitize existing metrics — prevent AVG/SUM on text columns
@@ -127,12 +163,9 @@ class RAGEngine:
                     for i, m in enumerate(metrics):
                         if isinstance(m, dict) and "sqlExpression" in m:
                             expr = m["sqlExpression"].upper()
-                            # If it uses AVG/SUM/MIN/MAX, check if column is numeric
                             if any(expr.startswith(agg) for agg in ["AVG(", "SUM(", "MIN(", "MAX("]):
-                                # Extract column name from expression like AVG("col")
                                 col_match = expr.split('(', 1)[1].rstrip(')').strip().strip('"')
                                 if not self._is_column_numeric(dataset, col_match):
-                                    # Fall back to COUNT for non-numeric columns
                                     orig_col = m["sqlExpression"].split('(', 1)[1].rstrip(')')
                                     m["sqlExpression"] = f"COUNT({orig_col})"
                                     m["label"] = f"Count of {col_match}"
@@ -146,19 +179,21 @@ class RAGEngine:
                     target_chart.chart_type = target_type
                     await self.db.commit()
                     
-                    # Frontend uses new_chart_id to reload the dashboard iframe
                     new_chart_id = target_chart.superset_chart_id
                     
-                    display_type = "bar" if target_type in ("line", "area") else target_type
+                    # Build user-friendly response
+                    if target_type in ("line", "area") and datetime_col:
+                        answer = f"Done! I've changed '{target_chart.title}' to a **{target_type} chart** using `{datetime_col}` as the time axis. The visualization has been updated on your dashboard."
+                    elif target_type in ("line", "area") and not datetime_col:
+                        answer = f"Your data doesn't have a datetime column, so I've displayed '{target_chart.title}' as a **bar chart** instead. To get a line chart, your data needs a date/time column."
+                    else:
+                        answer = f"Done! I've changed '{target_chart.title}' to a **{target_type} chart**. The visualization has been updated on your dashboard."
+                    
                     chart_modification = {
                         "target_title": target_chart.title,
-                        "new_type": display_type,
+                        "new_type": target_type,
                     }
                     
-                    note = ""
-                    if target_type in ("line", "area"):
-                        note = " (displayed as bar chart because your data doesn't have a datetime axis)"
-                    answer = f"Done! I've changed '{target_chart.title}' to a **{display_type} chart**{note}. The visualization has been updated on your dashboard."
                     return ChatResponse(
                         answer=answer,
                         chart_modification=chart_modification,
@@ -201,30 +236,25 @@ class RAGEngine:
                     if dataset.superset_dataset_id:
                         try:
                             raw_type = sql_result.get("chart_type", "table")
-                            viz_type_map = {
-                                "bar": "dist_bar", "line": "dist_bar", "area": "dist_bar",
-                                "pie": "pie", "scatter": "echarts_scatter",
-                                "table": "table", "big_number": "big_number_total",
-                            }
-                            ss_viz = viz_type_map.get(raw_type, "dist_bar")
                             x_col_r = sql_result.get("x_col")
                             y_col_r = sql_result.get("y_col")
+                            datetime_col = self._find_datetime_column(dataset)
 
-                            # Determine safe aggregation function
-                            def _is_num(cname):
-                                s = dataset.raw_schema or {}
-                                cols = []
-                                for t in s.get("tables", []):
-                                    cols.extend(t.get("columns", []))
-                                cols.extend(s.get("columns", []))
-                                for c in cols:
-                                    nm = c.get("name", c.get("column_name", ""))
-                                    if nm == cname:
-                                        ct = str(c.get("type", c.get("data_type", ""))).upper()
-                                        return any(k in ct for k in ["INT", "FLOAT", "DECIMAL", "NUMERIC", "DOUBLE", "REAL", "BIGINT"])
-                                return False
+                            # Smart viz type: use timeseries when datetime exists
+                            if raw_type in ("line", "area") and datetime_col:
+                                ss_viz = "echarts_timeseries_line" if raw_type == "line" else "echarts_timeseries"
+                            elif raw_type in ("line", "area") and not datetime_col:
+                                ss_viz = "dist_bar"  # fallback — no datetime available
+                            else:
+                                viz_type_map = {
+                                    "bar": "dist_bar", "pie": "pie",
+                                    "scatter": "echarts_scatter",
+                                    "table": "table", "big_number": "big_number_total",
+                                }
+                                ss_viz = viz_type_map.get(raw_type, "dist_bar")
 
-                            agg = "SUM" if _is_num(y_col_r) else "COUNT"
+                            # Safe aggregation — prevent AVG/SUM on text columns
+                            agg = "SUM" if self._is_column_numeric(dataset, y_col_r or "") else "COUNT"
                             quoted_y = f'"{y_col_r}"' if y_col_r else None
                             metric_obj = {
                                 "expressionType": "SQL",
@@ -235,8 +265,16 @@ class RAGEngine:
                             }
                             if not x_col_r and ss_viz != "table":
                                 ss_viz = "big_number_total"
+
                             chart_params = {"viz_type": ss_viz, "adhoc_filters": [], "row_limit": 1000, "color_scheme": "supersetColors"}
-                            if ss_viz in ("dist_bar", "line", "area"):
+
+                            if ss_viz.startswith("echarts_timeseries"):
+                                # Time-series line/area
+                                chart_params["granularity_sqla"] = datetime_col
+                                chart_params["time_grain_sqla"] = "P1D"
+                                chart_params["metrics"] = [metric_obj]
+                                chart_params["groupby"] = []
+                            elif ss_viz == "dist_bar":
                                 chart_params["groupby"] = [x_col_r] if x_col_r else []
                                 chart_params["metrics"] = [metric_obj]
                             elif ss_viz == "pie":
@@ -248,6 +286,7 @@ class RAGEngine:
                             else:
                                 chart_params["groupby"] = [x_col_r] if x_col_r else []
                                 chart_params["metrics"] = [metric_obj]
+
                             ss_chart_id = await self.superset.create_chart(
                                 datasource_id=dataset.superset_dataset_id,
                                 title=sql_result.get("title", "AI Chart"),
@@ -369,10 +408,10 @@ class RAGEngine:
         ]
         chart_type_map = {
             "bar": "bar", "bar chart": "bar", "bar graph": "bar",
-            "line": "bar", "line chart": "bar", "line graph": "bar",   # line needs datetime → force bar
+            "line": "line", "line chart": "line", "line graph": "line",
             "pie": "pie", "pie chart": "pie", "donut": "doughnut", "doughnut": "doughnut",
             "scatter": "scatter", "scatter plot": "scatter", "scatter chart": "scatter",
-            "area": "bar", "area chart": "bar",                       # area needs datetime → force bar
+            "area": "area", "area chart": "area",
             "table": "table",
         }
 
