@@ -156,6 +156,16 @@ class RAGEngine:
                         if new_viz in ("dist_bar", "pie") and existing_x:
                             params["groupby"] = [existing_x]
                             params.pop("x_axis", None)
+                            
+                        # Line/Bar require 'metrics' (plural)
+                        if new_viz not in ("pie", "big_number_total") and not params.get("metrics"):
+                            if params.get("metric"):
+                                params["metrics"] = [params.get("metric")]
+                                
+                        # Pie and Big Number require the singular "metric" parameter
+                        if new_viz in ("pie", "big_number_total") and not params.get("metric"):
+                            if params.get("metrics") and len(params["metrics"]) > 0:
+                                params["metric"] = params["metrics"][0]
                     
                     params["viz_type"] = new_viz
                     
