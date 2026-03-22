@@ -4,6 +4,7 @@ Dashboard endpoints — list, embed token, chart list
 
 import uuid
 import logging
+import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,18 @@ from app.services.superset_client import SupersetClient
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Module-level singleton — one connection pool shared across all requests
+_sync_engine = None
+
+
+def _get_sync_engine():
+    """Return the shared sync SQLAlchemy engine, creating it once."""
+    global _sync_engine
+    if _sync_engine is None:
+        sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+        _sync_engine = sa.create_engine(sync_url, pool_size=5, max_overflow=10)
+    return _sync_engine
 
 router = APIRouter()
 
@@ -266,15 +279,13 @@ async def get_chart_data(
         raise HTTPException(status_code=404, detail="No charts found for this dataset")
 
     # Execute SQL and build chart data
-    import sqlalchemy as sa
-    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
-    sync_engine = sa.create_engine(sync_url)
+    engine = _get_sync_engine()
 
     chart_items = []
     for chart in charts:
         try:
             chart_item = _build_chart_data(
-                sync_engine, chart, dataset.warehouse_table
+                engine, chart, dataset.warehouse_table
             )
             chart_items.append(chart_item)
         except Exception as e:
@@ -289,7 +300,7 @@ async def get_chart_data(
                 ai_reasoning=chart.ai_reasoning,
             ))
 
-    sync_engine.dispose()
+    # No dispose — the singleton engine manages its own pool
 
     return ChartDataResponse(
         dataset_id=dataset.id,
@@ -458,9 +469,9 @@ def _build_chart_data(engine, chart: Chart, table_name: str) -> ChartDataItem:
 
 
 def _safe_val(v):
-    """Convert DB values to JSON-safe types."""
+    """Convert DB values to JSON-safe types. Preserves None for non-numeric columns."""
     if v is None:
-        return 0
+        return None
     if isinstance(v, (int, float)):
         return v
     try:

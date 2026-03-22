@@ -44,14 +44,16 @@ async def connect_database(
         raise HTTPException(status_code=400, detail=f"Connection failed: {message}")
 
     import json
-    connection_config = body.model_dump(exclude={"password"})  # never store password in plain
-    connection_config["password"] = body.password  # stored encrypted in prod; plain here for simplicity
+    # Store the config with the password masked — the actual password is passed
+    # directly to the pipeline worker and never persisted in plaintext.
+    connection_config = body.model_dump()
+    stored_config = {**connection_config, "password": "***REDACTED***"} if connection_config.get("password") else connection_config
 
     dataset = Dataset(
         user_id=current_user["user_id"],
         name=body.alias,
         source_type=body.db_type,
-        source_reference=json.dumps(connection_config),
+        source_reference=json.dumps(stored_config),
         status="pending",
     )
     db.add(dataset)
@@ -62,6 +64,7 @@ async def connect_database(
         run_full_pipeline,
         dataset_id=str(dataset.id),
         mode="connect",
+        source_type=body.db_type,
         connection_config=body.model_dump(),
     )
 

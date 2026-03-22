@@ -6,6 +6,7 @@ Every answer is grounded in real data retrieved from chunk embeddings.
 import json
 import logging
 import math
+import uuid
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
@@ -44,11 +45,16 @@ class RAGEngine:
         5. If modification: return modification instructions
         6. Generate grounded answer with Gemini
         """
-        # Step 1: embed query
-        query_vector = await self.gemini.embed_query(user_message)
-
-        # Step 2: retrieve relevant chunks
-        chunks = await self._retrieve_chunks(dataset.id, query_vector, top_k=8)
+        # Step 1: embed query gracefully
+        try:
+            query_vector = await self.gemini.embed_query(user_message)
+            # Step 2: retrieve relevant chunks
+            chunks = await self._retrieve_chunks(dataset.id, query_vector, top_k=8)
+        except Exception as e:
+            logger.warning(f"Embedding query failed, likely quota hit. Skipping dense retrieval. Error: {e}")
+            query_vector = []
+            chunks = []
+            
         context_texts = [c.chunk_text for c in chunks]
 
         # Get existing chart titles for modification detection
@@ -92,7 +98,7 @@ class RAGEngine:
                         "line": "line",
                         "area": "area",
                         "pie": "pie",
-                        "scatter": "scatter",
+                        "scatter": "echarts_scatter",
                         "table": "table",
                         "big_number": "big_number_total",
                     }
@@ -131,12 +137,13 @@ class RAGEngine:
             )
 
         # Step 4b: handle chart creation intent
-        if intent.get("is_chart_request") and dataset.warehouse_table:
+        wh_table = dataset.warehouse_table
+        if intent.get("is_chart_request") and wh_table:
             try:
                 sql_result = await self.gemini.generate_sql(
                     question=user_message,
                     schema=dataset.ai_schema or {},
-                    table_name=dataset.warehouse_table,
+                    table_name=wh_table,
                     history=history,
                 )
                 sql_generated = sql_result.get("sql")
@@ -155,16 +162,58 @@ class RAGEngine:
                     # Also save chart record + Superset chart if available
                     if dataset.superset_dataset_id:
                         try:
-                            chart_params = {
-                                "viz_type": sql_result.get("chart_type", "table"),
-                                "adhoc_filters": [],
-                                "row_limit": 1000,
-                                "groupby": [sql_result["x_col"]] if sql_result.get("x_col") else [],
+                            raw_type = sql_result.get("chart_type", "table")
+                            viz_type_map = {
+                                "bar": "dist_bar", "line": "dist_bar", "area": "dist_bar",
+                                "pie": "pie", "scatter": "echarts_scatter",
+                                "table": "table", "big_number": "big_number_total",
                             }
+                            ss_viz = viz_type_map.get(raw_type, "dist_bar")
+                            x_col_r = sql_result.get("x_col")
+                            y_col_r = sql_result.get("y_col")
+
+                            # Determine safe aggregation function
+                            def _is_num(cname):
+                                s = dataset.raw_schema or {}
+                                cols = []
+                                for t in s.get("tables", []):
+                                    cols.extend(t.get("columns", []))
+                                cols.extend(s.get("columns", []))
+                                for c in cols:
+                                    nm = c.get("name", c.get("column_name", ""))
+                                    if nm == cname:
+                                        ct = str(c.get("type", c.get("data_type", ""))).upper()
+                                        return any(k in ct for k in ["INT", "FLOAT", "DECIMAL", "NUMERIC", "DOUBLE", "REAL", "BIGINT"])
+                                return False
+
+                            agg = "SUM" if _is_num(y_col_r) else "COUNT"
+                            quoted_y = f'"{y_col_r}"' if y_col_r else None
+                            metric_obj = {
+                                "expressionType": "SQL",
+                                "sqlExpression": f"{agg}({quoted_y})" if quoted_y else "COUNT(*)",
+                                "label": f"{agg} of {y_col_r}" if y_col_r else "Count",
+                                "hasCustomLabel": True,
+                                "optionName": f"metric_{uuid.uuid4().hex[:8]}",
+                            }
+                            if not x_col_r and ss_viz != "table":
+                                ss_viz = "big_number_total"
+                            chart_params = {"viz_type": ss_viz, "adhoc_filters": [], "row_limit": 1000, "color_scheme": "supersetColors"}
+                            if ss_viz in ("dist_bar", "line", "area"):
+                                chart_params["groupby"] = [x_col_r] if x_col_r else []
+                                chart_params["metrics"] = [metric_obj]
+                            elif ss_viz == "pie":
+                                chart_params["groupby"] = [x_col_r] if x_col_r else []
+                                chart_params["metric"] = metric_obj
+                                chart_params["metrics"] = [metric_obj]
+                            elif ss_viz == "big_number_total":
+                                chart_params["metric"] = metric_obj
+                            else:
+                                chart_params["groupby"] = [x_col_r] if x_col_r else []
+                                chart_params["metrics"] = [metric_obj]
                             ss_chart_id = await self.superset.create_chart(
                                 datasource_id=dataset.superset_dataset_id,
                                 title=sql_result.get("title", "AI Chart"),
-                                chart_type=sql_result.get("chart_type", "table"),
+                                chart_type=ss_viz,
                                 params=chart_params,
                             )
                             new_chart_id = ss_chart_id

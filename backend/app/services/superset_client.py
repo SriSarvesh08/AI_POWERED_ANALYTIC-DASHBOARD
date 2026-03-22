@@ -79,9 +79,13 @@ class SupersetClient:
         """Register our data warehouse PostgreSQL with Superset and return its ID."""
         headers = await self._headers()
         
-        # Check if already registered using precise filter
-        q = json.dumps({"filters": [{"col": "database_name", "opr": "eq", "value": db_name}]})
-        resp = await self._get(f"/api/v1/database/?q={q}", headers=headers)
+        # Check if already registered using precise filter. Use RISON format explicitly
+        # Superset 3.1.1 strictly parses RISON format efficiently for these endpoints without 422 schema errors.
+        q_rison = f"(filters:!((col:database_name,opr:eq,value:'{db_name}')))"
+        
+        resp = await self._client.get("/api/v1/database/", params={"q": q_rison}, headers=headers)
+        resp.raise_for_status()
+        
         results = resp.json().get("result", [])
         if results:
             return results[0]["id"]
@@ -97,7 +101,8 @@ class SupersetClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 422:
                 # Check again directly just in case of parallel creation
-                resp = await self._get(f"/api/v1/database/?q={q}", headers=headers)
+                resp = await self._client.get("/api/v1/database/", params={"q": q_rison}, headers=headers)
+                resp.raise_for_status()
                 results = resp.json().get("result", [])
                 if results:
                     return results[0]["id"]
@@ -112,11 +117,17 @@ class SupersetClient:
         """Create a Superset virtual dataset pointing to our warehouse table. Idempotent."""
         headers = await self._headers()
         
-        # Check if already exists
-        resp = await self._get("/api/v1/dataset/", headers=headers)
-        for d in resp.json().get("result", []):
-            if d.get("table_name") == table_name and d.get("schema") == schema:
-                return d["id"]
+        # Check if already exists using precise filter
+        q = json.dumps({
+            "filters": [
+                {"col": "table_name", "opr": "eq", "value": table_name},
+                {"col": "schema", "opr": "eq", "value": schema}
+            ]
+        })
+        resp = await self._get(f"/api/v1/dataset/?q={q}", headers=headers)
+        results = resp.json().get("result", [])
+        if results:
+            return results[0]["id"]
 
         try:
             resp = await self._post("/api/v1/dataset/", headers=headers, json={
@@ -125,7 +136,28 @@ class SupersetClient:
                 "table_name": table_name,
                 "always_filter_main_dttm": False,
             })
-            return resp.json()["id"]
+            dataset_id = resp.json()["id"]
+            
+            # --- Auto-configure Time Column ---
+            try:
+                # Fetch dataset details to see columns
+                get_resp = await self._get(f"/api/v1/dataset/{dataset_id}", headers=headers)
+                ds_data = get_resp.json().get("result", {})
+                cols = ds_data.get("columns", [])
+                
+                # Look for a likely time column if none is set
+                if not ds_data.get("main_dttm_col") and cols:
+                    time_cols = [c["column_name"] for c in cols if any(x in c["column_name"].lower() for x in ["date", "time", "timestamp", "created", "updated"])]
+                    if time_cols:
+                        best_time_col = time_cols[0]
+                        await self._client.put(f"/api/v1/dataset/{dataset_id}", headers=headers, json={
+                            "main_dttm_col": best_time_col
+                        })
+                        logger.info(f"Auto-set main_dttm_col for dataset {dataset_id} to {best_time_col}")
+            except Exception as e:
+                logger.warning(f"Failed to auto-configure time column: {e}")
+                
+            return dataset_id
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 422:
                 # Double check again if it was created in a race condition
@@ -133,6 +165,8 @@ class SupersetClient:
                 for d in resp.json().get("result", []):
                     if d.get("table_name") == table_name:
                         return d["id"]
+                logger.error(f"Superset 422 error details: {e.response.text}")
+                raise ValueError(f"Superset 422 Error: {e.response.text}") from e
             raise
 
     # ── Charts ────────────────────────────────────────────────────────────────
@@ -145,31 +179,27 @@ class SupersetClient:
         params: Dict[str, Any],
     ) -> int:
         """Create a Superset chart and return its ID."""
-        # Map to legacy Superset viz types that do NOT require datetime columns
-        # echarts_timeseries_* types REQUIRE datetime — do NOT use them
-        viz_map = {
-            "bar": "dist_bar",
-            "line": "line",
-            "area": "area",
-            "pie": "pie",
-            "scatter": "scatter",
-            "table": "table",
-            "big_number": "big_number_total",
-        }
-        viz_type = viz_map.get(chart_type, "table")
-
-        # Ensure params have the viz_type set correctly
+        # Trust the modern ECharts type passed from the orchestrator
+        viz_type = chart_type
+        
+        # Override params viz_type for consistency
         params["viz_type"] = viz_type
 
         headers = await self._headers()
-        resp = await self._post("/api/v1/chart/", headers=headers, json={
-            "slice_name": title,
-            "viz_type": viz_type,
-            "datasource_id": datasource_id,
-            "datasource_type": "table",
-            "params": json.dumps(params),
-        })
-        return resp.json()["id"]
+        try:
+            resp = await self._post("/api/v1/chart/", headers=headers, json={
+                "slice_name": title,
+                "viz_type": viz_type,
+                "datasource_id": datasource_id,
+                "datasource_type": "table",
+                "params": json.dumps(params),
+            })
+            return resp.json()["id"]
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 422:
+                logger.error(f"Superset Chart 422 Error details: {e.response.text}")
+                raise ValueError(f"Superset Chart 422 Error: {e.response.text}") from e
+            raise
 
     async def update_chart(self, chart_id: int, updates: Dict[str, Any]) -> bool:
         """Update an existing chart."""

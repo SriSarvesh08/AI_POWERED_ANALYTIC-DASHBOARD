@@ -6,37 +6,24 @@ import s from './DashboardPage.module.css'
 
 
 /* ──────────────────────────────────────────────────────────────────────
-   Superset auto-login helper
+   Superset session helper — uses the backend server-side login endpoint.
+   No credentials are ever sent or stored in the browser.
    ────────────────────────────────────────────────────────────────────── */
-async function loginToSuperset() {
+async function loginToSuperset(datasetId) {
+  if (!datasetId) return false
   try {
-    // 1. Fetch superset login page to grab the CSRF token
-    const loginPage = await fetch('/login/', { credentials: 'include' })
-    const html = await loginPage.text()
-
-    // Extract CSRF token
-    let csrf = ''
-    const m1 = html.match(/name="csrf_token"[^>]*value="([^"]+)"/)
-    const m2 = html.match(/csrf_token.*?value="([^"]+)"/)
-    csrf = m1?.[1] || m2?.[1] || ''
-
-    // 2. POST login form to set Superset session cookie
-    const formData = new URLSearchParams()
-    formData.set('username', 'admin')
-    formData.set('password', 'admin')
-    if (csrf) formData.set('csrf_token', csrf)
-
-    await fetch('/login/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: formData.toString(),
+    // The backend handles Superset authentication server-side and sets
+    // a session cookie via its HTML auto-login page response.
+    const resp = await fetch(`/api/dashboard/${datasetId}/superset-view`, {
       credentials: 'include',
-      redirect: 'manual',  // Don't follow redirect — we just need the cookie
+      headers: {
+        Authorization: `Bearer ${localStorage.getItem('dp_token') || ''}`,
+      },
     })
-
-    return true
+    // A 200 means Superset already authenticated us (backend redirected via form)
+    return resp.ok || resp.status === 0 || resp.redirected
   } catch (err) {
-    console.warn('Superset auto-login error:', err)
+    console.warn('Superset session initialisation error:', err)
     return false
   }
 }
@@ -78,10 +65,11 @@ export default function DashboardPage() {
       .finally(() => setLoadingList(false))
   }, [datasetId])
 
-  // ── Auto-login to Superset once ──────────────────────────────────────
+  // ── Auto-login to Superset when selection changes ───────────────────
   useEffect(() => {
-    loginToSuperset().then(ok => setLoggedIn(ok))
-  }, [])
+    if (!selected?.dataset_id) return
+    loginToSuperset(selected.dataset_id).then(ok => setLoggedIn(ok))
+  }, [selected?.dataset_id])
 
   // ── Load Superset dashboard in iframe ────────────────────────────────
   useEffect(() => {

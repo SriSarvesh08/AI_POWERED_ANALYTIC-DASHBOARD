@@ -106,6 +106,27 @@ export default function DataSourcePage() {
 
   const set = (k) => (e) => setConnForm(f => ({ ...f, [k]: e.target.value }))
 
+  const handleFirebaseUpload = (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      try {
+        const jsonContent = event.target.result
+        const json = JSON.parse(jsonContent)
+        setConnForm(f => ({
+          ...f,
+          service_account_json: jsonContent,
+          project_id: json.project_id || f.project_id
+        }))
+        toast.success('Firebase JSON loaded!')
+      } catch (err) {
+        toast.error('Invalid JSON file')
+      }
+    }
+    reader.readAsText(file)
+  }
+
   return (
     <div className="fade-in">
       <div className={s.header}>
@@ -223,17 +244,25 @@ export default function DataSourcePage() {
                   </>
                 ) : (
                   <>
-                    <Field label="Firebase project ID" value={connForm.project_id} onChange={set('project_id')} placeholder="my-project-12345" />
                     <div className={s.formRow}>
                       <label className={s.fieldLabel}>Service account JSON</label>
-                      <textarea
-                        className={s.textarea}
-                        placeholder='Paste your service account JSON here…'
-                        value={connForm.service_account_json}
-                        onChange={set('service_account_json')}
-                        rows={5}
-                      />
+                      <div className={s.fileInputWrapper}>
+                        <input
+                          type="file"
+                          accept=".json"
+                          id="firebase-json-upload"
+                          style={{ display: 'none' }}
+                          onChange={handleFirebaseUpload}
+                        />
+                        <label htmlFor="firebase-json-upload" className={s.fileInputBtn}>
+                          <Upload size={14} /> {connForm.service_account_json ? 'Replace JSON' : 'Upload JSON'}
+                        </label>
+                        {connForm.service_account_json && (
+                          <span className={s.fileName}>JSON Loaded ✅</span>
+                        )}
+                      </div>
                     </div>
+                    <Field label="Firebase project ID" value={connForm.project_id} onChange={set('project_id')} placeholder="my-project-12345" />
                   </>
                 )}
 

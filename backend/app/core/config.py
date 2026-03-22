@@ -21,13 +21,13 @@ class Settings(BaseSettings):
 
     # Gemini AI
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_MODEL: str = "gemini-2.0-flash"
     GEMINI_EMBEDDING_MODEL: str = "models/gemini-embedding-001"
 
     # Groq AI (Fallback/Alternative)
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.1-70b-versatile"
-    USE_GROQ: bool = False
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    USE_GROQ: bool = True
 
     # Apache Superset
     SUPERSET_BASE_URL: str = "http://superset:8088"

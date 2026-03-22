@@ -26,6 +26,8 @@ async def test_connection(config: DBConnectRequest) -> Tuple[bool, str]:
         else:
             return False, f"Unsupported db_type: {config.db_type}"
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return False, str(e)
 
 
@@ -73,17 +75,19 @@ async def _test_firebase(cfg: DBConnectRequest) -> Tuple[bool, str]:
     import firebase_admin
     from firebase_admin import credentials, firestore
 
-    sa_info = json.loads(cfg.service_account_json)
-    cred = credentials.Certificate(sa_info)
-    app_name = f"datapilot_{cfg.project_id}"
-    try:
-        app = firebase_admin.get_app(app_name)
-    except ValueError:
-        app = firebase_admin.initialize_app(cred, name=app_name)
+    def _do_test():
+        sa_info = json.loads(cfg.service_account_json)
+        cred = credentials.Certificate(sa_info)
+        app_name = f"datapilot_{cfg.project_id}"
+        try:
+            app = firebase_admin.get_app(app_name)
+        except ValueError:
+            app = firebase_admin.initialize_app(cred, name=app_name)
+        db = firestore.client(app)
+        # Just list collections as a connectivity check
+        list(db.collections())
 
-    db = firestore.client(app)
-    # Just list collections as a connectivity check
-    list(db.collections())
+    await asyncio.get_event_loop().run_in_executor(None, _do_test)
     return True, "Firebase Firestore connection successful"
 
 
@@ -174,20 +178,35 @@ class ExternalDBConnector:
     async def _schema_firebase(self) -> Dict[str, Any]:
         """
         Firebase is schema-less — sample documents to infer field types.
+        Maps Python type names to SQL types so the orchestrator can correctly
+        identify numeric vs text columns for aggregation safety.
         """
         import json
         import firebase_admin
         from firebase_admin import credentials, firestore
 
-        sa_info = json.loads(self.config.service_account_json)
-        cred = credentials.Certificate(sa_info)
-        app_name = f"datapilot_{self.config.project_id}_schema"
-        try:
-            app = firebase_admin.get_app(app_name)
-        except ValueError:
-            app = firebase_admin.initialize_app(cred, name=app_name)
+        # Python type name -> SQL type for the orchestrator's column type checker
+        PYTHON_TO_SQL = {
+            "int": "INTEGER",
+            "float": "FLOAT",
+            "bool": "BOOLEAN",
+            "str": "TEXT",
+            "datetime": "TIMESTAMP",
+            "Timestamp": "TIMESTAMP",
+            "NoneType": "TEXT",
+        }
+
+        config = self.config  # capture for use inside thread
 
         def _sample():
+            sa_info = json.loads(config.service_account_json)
+            cred = credentials.Certificate(sa_info)
+            app_name = f"datapilot_{config.project_id}_schema"
+            try:
+                app = firebase_admin.get_app(app_name)
+            except ValueError:
+                app = firebase_admin.initialize_app(cred, name=app_name)
+
             db = firestore.client(app)
             tables = {}
             for col in db.collections():
@@ -197,7 +216,9 @@ class ExternalDBConnector:
                 fields = {}
                 for doc in docs:
                     for k, v in doc.to_dict().items():
-                        fields[k] = type(v).__name__
+                        python_type = type(v).__name__
+                        # Translate to SQL type so the orchestrator understands it
+                        fields[k] = PYTHON_TO_SQL.get(python_type, "TEXT")
                 tables[col.id] = [
                     {"column_name": k, "data_type": v} for k, v in fields.items()
                 ]

@@ -119,14 +119,14 @@ export default function ChatPage() {
 
         <div className={s.sidebarTitle} style={{ marginTop: 16 }}>Try asking</div>
         <div className={s.suggList}>
-          {SUGGESTIONS.map(s => (
-            <button key={s} className={s} onClick={() => sendMessage(s)}
+          {SUGGESTIONS.map(suggestion => (
+            <button key={suggestion} className={s.suggBtn} onClick={() => sendMessage(suggestion)}
               style={{ width:'100%', textAlign:'left', background:'none', border:'1px solid var(--border)',
                 borderRadius:'var(--radius-md)', padding:'6px 10px', fontSize:11, color:'var(--gray-600)',
                 cursor:'pointer', transition:'all var(--transition)', marginBottom:4 }}
               onMouseOver={e => { e.currentTarget.style.background='var(--surface-2)'; e.currentTarget.style.color='var(--gray-900)' }}
               onMouseOut={e => { e.currentTarget.style.background='none'; e.currentTarget.style.color='var(--gray-600)' }}
-            >{s}</button>
+            >{suggestion}</button>
           ))}
         </div>
       </aside>
@@ -146,7 +146,7 @@ export default function ChatPage() {
               </div>
             </div>
           </div>
-          <div className={s.ragBadge}><Sparkles size={10} /> RAG · Gemini 1.5 Pro</div>
+          <div className={s.ragBadge}><Sparkles size={10} /> RAG · Gemini 2.0 Flash</div>
         </div>
 
         {/* Messages */}

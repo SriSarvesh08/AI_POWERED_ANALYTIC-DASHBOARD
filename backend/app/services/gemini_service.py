@@ -33,49 +33,91 @@ class GeminiService:
         else:
             logger.info(f"AI Service initialized with Gemini ({settings.GEMINI_MODEL})")
 
-    async def _generate_with_retry(self, prompt: str, max_retries: int = 5) -> Any:
-        """Helper to generate content with exponential backoff or use Groq."""
-        if self.use_groq:
-            try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": settings.GROQ_MODEL,
-                            "messages": [{"role": "user", "content": prompt}],
-                            "temperature": 0.1,
-                        },
-                        timeout=60.0,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    content = data["choices"][0]["message"]["content"]
-                    
-                    # Mock a Gemini-like response object for compatibility
-                    class MockResponse:
-                        def __init__(self, text): self.text = text
-                    return MockResponse(content)
-            except Exception as e:
-                logger.error(f"Groq generation error via HTTP: {e}")
-                raise e
-
-        # Original Gemini logic
+    async def _generate_with_retry(self, prompt: str, max_retries: int = 3) -> Any:
+        """Helper to generate content with failover to Groq and retries."""
+        # Note: If self.use_groq is explicitly TRUE at start, we use it directly.
+        # Otherwise, we use Gemini and only failover if Gemini is exhausted.
+        
+        can_failover = settings.GROQ_API_KEY and settings.GROQ_MODEL
+        
         for i in range(max_retries):
             try:
-                return await asyncio.to_thread(self.gemini_model.generate_content, prompt)
-            except exceptions.ResourceExhausted as e:
+                # 1. Try Gemini first (if not explicitly told to use Groq)
+                if not self.use_groq:
+                    try:
+                        resp = await asyncio.to_thread(self.gemini_model.generate_content, prompt)
+                        return resp
+                    except (exceptions.ResourceExhausted, exceptions.ServiceUnavailable) as e:
+                        if can_failover:
+                            logger.warning(f"Gemini quota/service issue (Attempt {i+1}). Failing over to Groq...")
+                            return await self._generate_with_groq(prompt)
+                        raise e  # re-raise to be caught by outer loop for retry
+
+                # 2. Use Groq if explicitly requested
+                if self.use_groq:
+                    return await self._generate_with_groq(prompt)
+
+            except Exception as e:
+                # Catch-all for other errors (network issues, etc.)
+                if i == max_retries - 1:
+                    logger.error(f"AI generation failed after {max_retries} attempts: {e}")
+                    raise e
+                
+                wait = (2 ** i) + 1
+                logger.warning(f"AI generation error ({e}). Retrying in {wait}s...")
+                await asyncio.sleep(wait)
+
+    async def _generate_with_groq(self, prompt: str) -> Any:
+        """Call Groq API directly via HTTP."""
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": settings.GROQ_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.1,
+                    },
+                    timeout=60.0,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+                
+                # Mock a Gemini-like response object for compatibility
+                class MockResponse:
+                    def __init__(self, text): self.text = text
+                return MockResponse(content)
+        except Exception as e:
+            logger.error(f"Groq generation error: {e}")
+            raise e
+
+    async def _embed_with_retry(self, text: str, task_type: str, max_retries: int = 5) -> list[float]:
+        """Support retries for embedding calls (only Gemini supported here)."""
+        for i in range(max_retries):
+            try:
+                result = await asyncio.to_thread(
+                    genai.embed_content,
+                    model=self.embedding_model,
+                    content=text,
+                    task_type=task_type,
+                )
+                return result["embedding"]
+            except (exceptions.ResourceExhausted, exceptions.ServiceUnavailable) as e:
                 if i == max_retries - 1:
                     raise e
-                wait_time = (2 ** i) + 1
-                logger.warning(f"Gemini quota exceeded (429). Retrying in {wait_time}s... (Attempt {i+1}/{max_retries})")
-                await asyncio.sleep(wait_time)
+                wait = (i * 2) + 2  # wait 2s, 4s, 6s...
+                logger.warning(f"Embedding quota hit. Waiting {wait}s... (Attempt {i+1}/{max_retries})")
+                await asyncio.sleep(wait)
             except Exception as e:
-                logger.error(f"Gemini generation error: {e}")
+                logger.error(f"Embedding error: {e}")
                 raise e
+        
+        raise exceptions.ResourceExhausted("Max retries exceeded for embeddings")
 
     # ── Schema Analysis ──────────────────────────────────────────────────────
 
@@ -109,7 +151,7 @@ Return ONLY valid JSON (no markdown, no explanation) with this exact structure:
       "x_column": "column_name or null",
       "y_column": "column_name or null",
       "group_by": "column_name or null",
-      "aggregation": "SUM|COUNT|AVG|MAX|MIN|COUNT_DISTINCT",
+      "aggregation": "SUM|COUNT|AVG|MAX|MIN|COUNT(DISTINCT column)",
       "sql": "SELECT ... FROM {{table}} ...",
       "reasoning": "why this chart is meaningful"
     }}
@@ -126,9 +168,13 @@ Rules:
 - Mark numeric columns measuring quantities as "metric"
 - Mark categorical/date columns used for grouping as "dimension"
 - Suggest 4-8 charts maximum — only suggest charts that would be MEANINGFUL and INSIGHTFUL
+- **CRITICAL AGGREGATION RULE**: Only use SUM or AVG for numeric 'metric' columns. For 'dimension' (categorical/text/bool) columns, always use COUNT or COUNT(DISTINCT column).
 - If there are 0 rows, 0 columns, or no meaningful data, set is_valid_for_analytics: false and return empty arrays
+- SQL queries MUST use valid PostgreSQL syntax.
+- **FOR UPLOADED FILES**: Note that all column names have been normalized to LOWERCASE.
+- Ensure any column names with spaces, uppercase letters, or special characters are wrapped in double quotes.
 - SQL queries should use {{table}} as a placeholder for the actual table name
-"""
+        """
 
         response = await self._generate_with_retry(prompt)
         text = response.text.strip()
@@ -158,7 +204,7 @@ Rules:
         question: str,
         schema: Dict[str, Any],
         table_name: str,
-        history: Optional[List[Dict]] = None,
+        history: Optional[list[dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """
         Generate SQL + chart type for a natural language question.
@@ -166,8 +212,9 @@ Rules:
         """
         history_str = ""
         if history:
+            h_slice = list(history)[-6:]
             history_str = "\nConversation history:\n" + "\n".join(
-                [f"{m['role']}: {m['content']}" for m in history[-6:]]
+                [f"{m['role']}: {m['content']}" for m in h_slice]
             )
 
         prompt = f"""
@@ -197,7 +244,9 @@ Rules:
 - Use appropriate aggregations (SUM, COUNT, AVG etc)
 - If the question doesn't require a chart (e.g. "what is the total?"), set is_chart_request: false
 - Never generate DROP, DELETE, UPDATE, INSERT or DDL statements
-"""
+- ALWAYS use strict PostgreSQL syntax. Wrap column names in double quotes if they contain uppercase characters, spaces or special characters.
+- **FOR UPLOADED FILES (table name starts with "ds_")**: All columns are strictly LOWERCASE. Use them exactly as provided in the schema.
+        """
 
         response = await self._generate_with_retry(prompt)
         text = response.text.strip()
@@ -227,12 +276,14 @@ USER INSTRUCTION: {instruction}
 
 Return ONLY valid JSON:
 {{
-  "viz_type": "new superset viz_type (e.g. bar, line, pie, echarts_timeseries_bar, etc.)",
+  "viz_type": "one of: dist_bar, line, area, pie, echarts_scatter, table, big_number_total",
   "params_override": {{ any Superset params_override dict }},
   "new_title": "new chart title or null to keep existing",
   "explanation": "what changed and why"
 }}
-"""
+
+IMPORTANT: Only use these valid viz_type values: dist_bar (for bar charts), line (for line charts), area (for area charts), pie (for pie charts), echarts_scatter (for scatter/bubble charts), table, big_number_total.
+        """
         response = await self._generate_with_retry(prompt)
         text = response.text.strip()
         if text.startswith("```"):
@@ -246,18 +297,21 @@ Return ONLY valid JSON:
     async def generate_rag_answer(
         self,
         question: str,
-        context_chunks: List[str],
+        context_chunks: list[str],
         data_summary: str,
-        history: Optional[List[Dict]] = None,
+        history: Optional[list[dict[str, str]]] = None,
     ) -> str:
         """
         Generate a grounded natural-language answer using retrieved data chunks.
         """
-        context = "\n\n".join(context_chunks[:8])
+        ctx_slice = list(context_chunks)[:8]
+        context = "\n\n".join(ctx_slice)
+        
         history_str = ""
         if history:
+            h_slice = list(history)[-4:]
             history_str = "\nPrevious conversation:\n" + "\n".join(
-                [f"{m['role']}: {m['content']}" for m in history[-4:]]
+                [f"{m['role']}: {m['content']}" for m in h_slice]
             )
 
         prompt = f"""
@@ -274,28 +328,16 @@ USER QUESTION: {question}
 
 Provide a clear, concise answer. If numbers are involved, be precise. 
 If the user asked for a chart or visualization, acknowledge that you're generating it.
-"""
+        """
         response = await self._generate_with_retry(prompt)
         return response.text.strip()
 
     # ── Embeddings ────────────────────────────────────────────────────────────
 
-    async def embed_text(self, text: str) -> List[float]:
+    async def embed_text(self, text: str) -> list[float]:
         """Generate embedding vector for a text chunk."""
-        result = await asyncio.to_thread(
-            genai.embed_content,
-            model=self.embedding_model,
-            content=text,
-            task_type="retrieval_document",
-        )
-        return result["embedding"]
+        return await self._embed_with_retry(text, task_type="retrieval_document")
 
-    async def embed_query(self, query: str) -> List[float]:
+    async def embed_query(self, query: str) -> list[float]:
         """Generate embedding vector for a search query."""
-        result = await asyncio.to_thread(
-            genai.embed_content,
-            model=self.embedding_model,
-            content=query,
-            task_type="retrieval_query",
-        )
-        return result["embedding"]
+        return await self._embed_with_retry(query, task_type="retrieval_query")

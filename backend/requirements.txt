@@ -29,7 +29,7 @@ xlrd==2.0.1
 # External DB drivers (install as needed)
 aiomysql==0.2.0
 # snowflake-connector-python==3.10.0  # heavy — install separately
-# firebase-admin==6.5.0               # install separately
+firebase-admin==6.5.0
 
 # Utilities
 python-dotenv==1.0.1

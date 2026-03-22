@@ -53,13 +53,17 @@ class IngestionService:
     def _load_file(self, file_path: str, source_type: str) -> pd.DataFrame:
         path = Path(file_path)
         if source_type == "csv":
-            return pd.read_csv(path, low_memory=False)
+            df = pd.read_csv(path, low_memory=False)
         elif source_type == "excel":
-            return pd.read_excel(path)
+            df = pd.read_excel(path)
         elif source_type == "sql_dump":
-            return self._parse_sql_dump(path)
+            df = self._parse_sql_dump(path)
         else:
             raise ValueError(f"Unknown source_type: {source_type}")
+            
+        # Permanent Fix: Normalise column names to lowercase to avoid Postgres case sensitivity issues
+        df.columns = [str(c).lower().replace(" ", "_").replace(".", "_") for c in df.columns]
+        return df
 
     def _parse_sql_dump(self, path: Path) -> pd.DataFrame:
         """
@@ -90,8 +94,8 @@ class IngestionService:
         df.columns = [f"col_{i}" for i in range(len(df.columns))]
         return df
 
-    def _make_table_name(self, dataset_id: str) -> str:
-        safe_id = dataset_id.replace("-", "_")
+    def _make_table_name(self, dataset_id: Any) -> str:
+        safe_id = str(dataset_id).replace("-", "_")
         return f"ds_{safe_id}"
 
     def _extract_schema(self, df: pd.DataFrame) -> Dict[str, Any]:
@@ -101,8 +105,24 @@ class IngestionService:
             sample = df[col].dropna().head(3).tolist()
             null_pct = round(df[col].isna().mean() * 100, 1)
             unique_count = int(df[col].nunique())
+            
+            # Map pandas dtype to SQL-like type for downstream detection
+            sql_type = "TEXT"
+            dtype_lower = dtype.lower()
+            if "int" in dtype_lower:
+                sql_type = "INTEGER"
+            elif "float" in dtype_lower or "double" in dtype_lower:
+                sql_type = "FLOAT"
+            elif "datetime" in dtype_lower:
+                sql_type = "TIMESTAMP"
+            elif "date" in dtype_lower:
+                sql_type = "DATE"
+            elif "bool" in dtype_lower:
+                sql_type = "BOOLEAN"
+            
             columns.append({
                 "name": col,
+                "type": sql_type,
                 "dtype": dtype,
                 "sample_values": [str(s) for s in sample],
                 "null_pct": null_pct,
@@ -110,6 +130,7 @@ class IngestionService:
                 "cardinality": "high" if unique_count > 50 else "low",
             })
         return {
+            "tables": [{"name": "uploaded_file", "columns": columns}],
             "columns": columns,
             "row_count": len(df),
             "col_count": len(df.columns),

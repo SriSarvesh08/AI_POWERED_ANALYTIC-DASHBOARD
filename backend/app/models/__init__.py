@@ -42,7 +42,7 @@ class Dataset(Base):
         nullable=False
     )
     # For uploads: original filename; for DB: connection alias
-    source_reference = Column(String(512))
+    source_reference = Column(Text)
     # Sanitised table name in our PostgreSQL data warehouse
     warehouse_table = Column(String(255))
     row_count = Column(Integer, default=0)

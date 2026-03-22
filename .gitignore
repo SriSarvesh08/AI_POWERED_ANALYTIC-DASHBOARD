@@ -179,3 +179,13 @@ debug_output.txt
 debug_output_2.txt
 debug_output_3.txt
 models_list.txt
+
+# Debug / patch scripts (never commit these)
+bad_charts.txt
+check_schema.py
+db_patch*.py
+debug_superset.py
+dump_bad_charts.py
+fix_broken_charts*.py
+force_timeseries*.py
+view_timeseries*.py
