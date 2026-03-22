@@ -268,6 +268,22 @@ async def _run(
         y_col = chart_spec.get("y_column")
         x_col = chart_spec.get("x_column")
         quoted_y = f'"{y_col}"' if y_col else None
+
+        # ── Quote all known column names in the AI-generated SQL ──────────
+        # This prevents postgres syntax errors from mixed-case or keyword columns.
+        import re
+        all_col_names = set()
+        for t in raw_schema.get("tables", []):
+            for c in t.get("columns", []):
+                all_col_names.add(c.get("name", c.get("column_name", "")))
+        for c in raw_schema.get("columns", []):
+            all_col_names.add(c.get("name", c.get("column_name", "")))
+        all_col_names.discard("")
+
+        # Sort longest first to avoid partial-name collisions
+        for col_name in sorted(all_col_names, key=len, reverse=True):
+            pattern = r'(?<!")(?<!\w)' + re.escape(col_name) + r'(?!\w)(?!")'
+            sql = re.sub(pattern, f'"{col_name}"', sql)
         
         # Aggregate all columns for quick lookup
         # Handle both file uploads (columns at root) and DB connects (nested in tables)
