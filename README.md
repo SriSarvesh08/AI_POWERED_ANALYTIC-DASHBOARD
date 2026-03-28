@@ -86,8 +86,8 @@ Uploaded File / Connected Database
 ### 1. Clone and configure
 
 ```bash
-git clone <repo>
-cd datapilot
+git clone https://github.com/SriSarvesh08/AI_POWERED_ANALYTIC-DASHBOARD.git
+cd AI_POWERED_ANALYTIC-DASHBOARD
 
 # Create env file
 cp .env.example .env
