@@ -1,0 +1,752 @@
+================================================================================
+                    DATAPILOT AI — PROJECT EXPLANATION & FLOW
+================================================================================
+
+Author:   Auto-generated documentation
+Project:  DataPilot AI — AI-Powered Analytics Dashboard Platform
+Stack:    FastAPI (Python) + React (Vite) + PostgreSQL + Apache Superset + Gemini AI
+License:  MIT
+
+================================================================================
+  1. WHAT IS DATAPILOT AI?
+================================================================================
+
+DataPilot AI is a fully automated, plug-and-play analytics platform. A user
+uploads any dataset (CSV, Excel, SQL dump) or connects an external database
+(PostgreSQL, MySQL, Snowflake, Firebase), and the system automatically:
+
+  1. Ingests the data into a PostgreSQL data warehouse
+  2. Uses Google Gemini AI to analyze the schema and pick meaningful columns
+  3. Generates appropriate charts via Apache Superset
+  4. Builds a RAG (Retrieval-Augmented Generation) chatbot so the user can
+     ask natural language questions about their data
+
+The entire process — from upload to a fully interactive dashboard with a
+chatbot — happens automatically in the background.
+
+================================================================================
+  2. HIGH-LEVEL ARCHITECTURE
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │              FRONTEND  (React + Vite + Chart.js)            │
+  │                                                             │
+  │   Login/Register  →  Upload/Connect  →  Pipeline Monitor    │
+  │         →  Dashboard Viewer  →  RAG Chatbot                 │
+  │                                                             │
+  │   Served at: http://localhost:80 (nginx in production)      │
+  │              http://localhost:5173 (Vite dev server)         │
+  └────────────────────────┬────────────────────────────────────┘
+                           │  REST API (JSON over HTTP)
+  ┌────────────────────────▼────────────────────────────────────┐
+  │              BACKEND  (FastAPI + Python 3.12)               │
+  │                                                             │
+  │   Auth API  │  Ingest API  │  Connect API  │  Pipeline API  │
+  │   Dashboard API  │  Chat API                                │
+  │                                                             │
+  │   Services:                                                 │
+  │     - Pipeline Orchestrator (6-step AI pipeline)            │
+  │     - Gemini Service (AI analysis, SQL gen, embeddings)     │
+  │     - Superset Client (REST API wrapper)                    │
+  │     - Ingestion Service (CSV/Excel/SQL parsing)             │
+  │     - DB Connector (external DB schema extraction)          │
+  │     - RAG Engine (retrieval + grounded answers)             │
+  │                                                             │
+  │   Served at: http://localhost:8000                           │
+  └────────┬──────────────────────┬─────────────────────────────┘
+           │                      │
+  ┌────────▼──────────┐  ┌───────▼──────────────────┐
+  │   PostgreSQL 16   │  │   Apache Superset 3.1.1  │
+  │                   │  │                           │
+  │  3 databases:     │  │  - Chart engine           │
+  │  - datapilot      │  │  - Dashboard builder      │
+  │    (warehouse +   │  │  - Guest token embedding  │
+  │     pipeline +    │  │                           │
+  │     embeddings)   │  │  Served at:               │
+  │  - datapilot_auth │  │  http://localhost:8088     │
+  │    (users)        │  └───────────────────────────┘
+  │  - superset       │
+  │    (Superset's    │  ┌───────────────────────────┐
+  │     metadata)     │  │   Redis 7                 │
+  └───────────────────┘  │   (Superset caching)      │
+                         │   Port: 6379              │
+                         └───────────────────────────┘
+
+================================================================================
+  3. PROJECT STRUCTURE — FILE BY FILE
+================================================================================
+
+datapilot/
+│
+├── docker-compose.yml        Full-stack orchestration (5 services)
+├── .env.example              Root environment variable template
+├── .env                      Actual secrets (never committed to git)
+│
+├── infra/
+│   ├── init_db.sql           Creates 3 PostgreSQL databases on first boot
+│   └── superset_config.py    Superset configuration (embedding, CORS, CSRF)
+│
+├── backend/
+│   ├── Dockerfile            Python slim image, installs requirements, runs uvicorn
+│   ├── requirements.txt      Python dependencies
+│   ├── .env / .env.example   Backend-specific env vars
+│   └── app/
+│       ├── main.py                    FastAPI app entry point, CORS, routers
+│       │
+│       ├── core/
+│       │   ├── config.py              Pydantic Settings (loads .env)
+│       │   └── security.py            JWT creation/verification, bcrypt hashing
+│       │
+│       ├── db/
+│       │   └── session.py             Async SQLAlchemy engines (main + auth)
+│       │
+│       ├── models/
+│       │   ├── __init__.py            ORM models (User, Dataset, Chart, etc.)
+│       │   └── schemas.py             Pydantic request/response schemas
+│       │
+│       ├── api/
+│       │   ├── auth.py                POST /register, POST /login, GET /me
+│       │   ├── ingest.py              POST /upload, GET /datasets
+│       │   ├── connect.py             POST /test, POST /connect
+│       │   ├── pipeline.py            GET /{dataset_id} (pipeline status)
+│       │   ├── dashboard.py           GET /, GET /{id}/embed-token, chart-data
+│       │   └── chat.py                POST /query, POST /modify-chart
+│       │
+│       └── services/
+│           ├── ingestion.py           CSV/Excel/SQL → pandas → PostgreSQL
+│           ├── db_connector.py        External DB schema extraction
+│           ├── gemini_service.py      All Gemini AI API calls
+│           ├── superset_client.py     Superset REST API wrapper
+│           ├── pipeline_orchestrator.py   The 6-step background pipeline
+│           └── rag_engine.py          RAG retrieval + answer generation
+│
+└── frontend/
+    ├── Dockerfile             Multi-stage build (npm build → nginx serve)
+    ├── nginx.conf             Reverse proxy to backend API
+    ├── package.json           React + Vite + Chart.js dependencies
+    ├── vite.config.js         Vite configuration with API proxy
+    └── src/
+        ├── main.jsx           React entry point (BrowserRouter + Toaster)
+        ├── App.jsx            Route definitions with auth guards
+        ├── contexts/
+        │   └── AuthContext.jsx     Global auth state (JWT in localStorage)
+        ├── services/
+        │   └── api.js              Axios instance with error interceptor
+        ├── styles/
+        │   └── global.css          CSS variables, design system, animations
+        ├── components/
+        │   └── AppShell.jsx        Sidebar + topbar layout wrapper
+        └── pages/
+            ├── LoginPage.jsx       Email + password login
+            ├── RegisterPage.jsx    Account creation
+            ├── OverviewPage.jsx    Dashboard stats + dataset list
+            ├── DataSourcePage.jsx  Upload (drag & drop) or Connect DB
+            ├── PipelinePage.jsx    Live pipeline status with polling
+            ├── DashboardPage.jsx   Chart.js-rendered dashboard view
+            └── ChatPage.jsx        RAG chatbot interface
+
+================================================================================
+  4. DATABASE DESIGN  (5 ORM Models)
+================================================================================
+
+A. AUTH DATABASE (datapilot_auth)
+─────────────────────────────────
+  Table: users
+  ┌──────────────────┬──────────────────┬──────────────────────────┐
+  │ Column           │ Type             │ Purpose                  │
+  ├──────────────────┼──────────────────┼──────────────────────────┤
+  │ id               │ UUID (PK)        │ Unique user identifier   │
+  │ email            │ VARCHAR(255)     │ Login credential (unique)│
+  │ hashed_password  │ VARCHAR(255)     │ bcrypt hash              │
+  │ full_name        │ VARCHAR(255)     │ Display name             │
+  │ is_active        │ BOOLEAN          │ Account enabled flag     │
+  │ created_at       │ TIMESTAMPTZ      │ Registration time        │
+  └──────────────────┴──────────────────┴──────────────────────────┘
+
+B. MAIN DATABASE (datapilot)
+────────────────────────────
+  Table: datasets
+  ┌─────────────────────────┬──────────────────┬────────────────────────────────┐
+  │ Column                  │ Type             │ Purpose                        │
+  ├─────────────────────────┼──────────────────┼────────────────────────────────┤
+  │ id                      │ UUID (PK)        │ Dataset identifier             │
+  │ user_id                 │ UUID (FK→users)  │ Owner                          │
+  │ name                    │ VARCHAR(255)     │ Filename or alias              │
+  │ source_type             │ ENUM             │ csv/excel/sql_dump/pg/mysql/   │
+  │                         │                  │ snowflake/firebase             │
+  │ source_reference        │ TEXT             │ File path or connection JSON   │
+  │ warehouse_table         │ VARCHAR(255)     │ Table name in data warehouse   │
+  │ row_count               │ INTEGER          │ Number of rows                 │
+  │ column_count            │ INTEGER          │ Number of columns              │
+  │ status                  │ ENUM             │ pending/ingested/ai_analyzing/ │
+  │                         │                  │ ai_done/superset_ready/error   │
+  │ error_message           │ TEXT             │ Error details if failed        │
+  │ raw_schema              │ JSON             │ Full schema before AI filter   │
+  │ ai_schema               │ JSON             │ AI-selected columns + charts   │
+  │ superset_dataset_id     │ INTEGER          │ Superset dataset ID            │
+  │ superset_dashboard_id   │ INTEGER          │ Superset dashboard ID          │
+  │ created_at / updated_at │ TIMESTAMPTZ      │ Timestamps                     │
+  └─────────────────────────┴──────────────────┴────────────────────────────────┘
+
+  Table: charts
+  ┌─────────────────────┬──────────────────┬────────────────────────────────┐
+  │ Column              │ Type             │ Purpose                        │
+  ├─────────────────────┼──────────────────┼────────────────────────────────┤
+  │ id                  │ UUID (PK)        │ Chart identifier               │
+  │ dataset_id          │ UUID (FK)        │ Parent dataset                 │
+  │ user_id             │ UUID             │ Owner                          │
+  │ superset_chart_id   │ INTEGER          │ Corresponding Superset chart   │
+  │ title               │ VARCHAR(255)     │ Chart title                    │
+  │ chart_type          │ VARCHAR(100)     │ bar/line/pie/scatter/etc.      │
+  │ sql_query           │ TEXT             │ SQL used to generate the chart │
+  │ ai_reasoning        │ TEXT             │ Why AI chose this chart        │
+  │ created_at          │ TIMESTAMPTZ      │ Creation time                  │
+  └─────────────────────┴──────────────────┴────────────────────────────────┘
+
+  Table: chunk_embeddings  (RAG Store)
+  ┌──────────────┬──────────────────┬────────────────────────────────────────┐
+  │ Column       │ Type             │ Purpose                                │
+  ├──────────────┼──────────────────┼────────────────────────────────────────┤
+  │ id           │ UUID (PK)        │ Chunk identifier                       │
+  │ dataset_id   │ UUID (FK)        │ Parent dataset                         │
+  │ chunk_text   │ TEXT             │ The text content of the chunk          │
+  │ embedding    │ JSON             │ Vector embedding (3072-dim float list) │
+  │ chunk_index  │ INTEGER          │ Ordering index                         │
+  │ created_at   │ TIMESTAMPTZ      │ Creation time                          │
+  └──────────────┴──────────────────┴────────────────────────────────────────┘
+
+  Table: pipeline_runs
+  ┌──────────────┬──────────────────┬────────────────────────────────────────┐
+  │ Column       │ Type             │ Purpose                                │
+  ├──────────────┼──────────────────┼────────────────────────────────────────┤
+  │ id           │ UUID (PK)        │ Run identifier                         │
+  │ dataset_id   │ UUID             │ Parent dataset                         │
+  │ step         │ VARCHAR(100)     │ Step name (ingest/schema_extract/etc.) │
+  │ status       │ ENUM             │ running/done/error                     │
+  │ detail       │ TEXT             │ Human-readable step result             │
+  │ started_at   │ TIMESTAMPTZ      │ When the step started                  │
+  │ finished_at  │ TIMESTAMPTZ      │ When the step completed                │
+  └──────────────┴──────────────────┴────────────────────────────────────────┘
+
+================================================================================
+  5. AUTHENTICATION FLOW
+================================================================================
+
+  ┌────────┐                    ┌──────────┐                ┌────────────┐
+  │ User   │                    │ Frontend │                │ Backend    │
+  └───┬────┘                    └────┬─────┘                └─────┬──────┘
+      │                              │                            │
+      │  1. Fill registration form   │                            │
+      │─────────────────────────────>│                            │
+      │                              │  POST /api/auth/register   │
+      │                              │  {email, password, name}   │
+      │                              │───────────────────────────>│
+      │                              │                            │ Hash password
+      │                              │                            │ with bcrypt
+      │                              │                            │ Store in
+      │                              │                            │ datapilot_auth
+      │                              │      201 Created           │ .users table
+      │                              │<───────────────────────────│
+      │                              │                            │
+      │  2. Login with credentials   │                            │
+      │─────────────────────────────>│                            │
+      │                              │  POST /api/auth/login      │
+      │                              │  {email, password}         │
+      │                              │───────────────────────────>│
+      │                              │                            │ Verify bcrypt
+      │                              │                            │ Generate JWT
+      │                              │   {access_token: "..."}    │ (HS256, 24hr)
+      │                              │<───────────────────────────│
+      │                              │                            │
+      │                              │ Store JWT in localStorage  │
+      │                              │ Set Authorization header   │
+      │                              │                            │
+      │  3. Access protected page    │                            │
+      │─────────────────────────────>│                            │
+      │                              │  GET /api/auth/me          │
+      │                              │  Authorization: Bearer JWT │
+      │                              │───────────────────────────>│
+      │                              │                            │ Decode JWT
+      │                              │                            │ Extract user_id
+      │                              │   {id, email, full_name}   │ Fetch from DB
+      │                              │<───────────────────────────│
+      │                              │                            │
+      │   Render authenticated UI    │                            │
+      │<─────────────────────────────│                            │
+
+  Security Details:
+  - Passwords: bcrypt hashing (salt built-in)
+  - Tokens: JWT with HS256 algorithm, expires in 24 hours
+  - Every protected endpoint uses the get_current_user() dependency
+    which decodes the JWT and extracts {user_id, email}
+  - On 401 response, frontend auto-redirects to /login
+
+================================================================================
+  6. THE CORE AI PIPELINE  (6 Steps — runs in background)
+================================================================================
+
+When the user uploads a file or connects a database, the pipeline runs
+automatically as a FastAPI BackgroundTask. The frontend polls the pipeline
+status endpoint every 2 seconds to show real-time progress.
+
+STEP 1: DATA INGESTION
+───────────────────────
+  Trigger: POST /api/ingest/upload or POST /api/connect/connect
+  
+  For FILE UPLOADS (CSV / Excel / SQL dump):
+    a. File is saved to /tmp/datapilot/uploads/{uuid}.{ext}
+    b. IngestionService reads it using pandas:
+       - CSV  → pd.read_csv()
+       - Excel → pd.read_excel()
+       - SQL   → regex parsing of INSERT statements → DataFrame
+    c. Column names are normalized to lowercase (e.g. "First Name" → "first_name")
+    d. DataFrame is bulk-inserted into a new PostgreSQL table named "ds_{uuid}"
+    e. Schema is extracted: column names, types, sample values, null %, cardinality
+  
+  For DATABASE CONNECTIONS (PostgreSQL / MySQL / Snowflake / Firebase):
+    a. ExternalDBConnector tests connectivity
+    b. Extracts schema by querying information_schema.columns (SQL DBs)
+       or by sampling Firestore documents (Firebase)
+    c. No data is ingested yet (that happens in Step 5 for Firebase)
+  
+  Result: raw_schema JSON stored in datasets.raw_schema
+  Status: "ingested"
+
+STEP 2: SCHEMA EXTRACTION
+──────────────────────────
+  This is a pass-through step that confirms the schema was mapped correctly.
+  Result: Immediate success.
+
+STEP 3: GEMINI AI SCHEMA ANALYSIS
+──────────────────────────────────
+  The raw_schema JSON is sent to Gemini (or Groq as fallback) with a detailed
+  prompt asking the AI to:
+  
+  a. Classify each column as: "metric" (numeric values to measure),
+     "dimension" (categorical values to group by), or "skip" (IDs, passwords, etc.)
+  b. Suggest 4-8 meaningful charts with:
+     - Chart type (bar, line, pie, area, scatter, table, big_number)
+     - X-axis column, Y-axis column, aggregation function
+     - SQL query using {{table}} placeholder
+     - Reasoning for why this chart is insightful
+  c. Identify key metrics, time columns, primary dimensions
+  d. Write a 2-3 sentence data summary
+  e. Determine if the data is valid for analytics (is_valid_for_analytics flag)
+  
+  CRITICAL RULE: The AI is instructed to only use SUM/AVG on numeric columns,
+  and COUNT on text/categorical columns. The pipeline also verifies this
+  against the actual PostgreSQL column types as a safety net.
+  
+  Result: ai_schema JSON stored in datasets.ai_schema
+  Status: "ai_analyzing" → "ai_done"
+
+STEP 4: AI DATA SELECTION
+──────────────────────────
+  Extracts the selected columns and suggested charts from the AI analysis.
+  Validates that at least 1 column and 1 chart suggestion exist.
+  If validation fails, the pipeline STOPS — no charts are generated.
+  
+  Result: Column list and chart queue prepared
+  Status: "ai_done"
+
+STEP 5: SUPERSET PUSH (Chart & Dashboard Generation)
+─────────────────────────────────────────────────────
+  This is the most complex step. For each AI-suggested chart:
+  
+  a. REGISTER THE DATABASE with Superset:
+     - For file uploads: registers the main datapilot warehouse PostgreSQL
+     - For external DBs: registers the external DB connection URI
+     - For Firebase: data is first ingested into PostgreSQL (since Superset
+       has no native Firebase connector), then the warehouse DB is registered
+  
+  b. CREATE A SUPERSET DATASET pointing to the warehouse table
+  
+  c. FOR EACH SUGGESTED CHART:
+     1. Determine the correct Superset viz_type:
+        - If x-axis is a date column → use echarts_timeseries_bar/line/area
+        - If x-axis is categorical → use dist_bar (categorical bar chart)
+        - Pie → pie, Scatter → echarts_scatter, Table → table
+     2. Build the metric object with safe aggregation:
+        - Numeric columns: SUM, AVG, etc.
+        - Text columns: COUNT only (AVG/SUM on text would cause errors)
+        - Extra safety: queries PostgreSQL information_schema to verify
+          the actual column type before choosing the aggregation
+     3. Build chart_params with groupby, metrics, filters, etc.
+     4. Call Superset REST API to create the chart
+     5. Save a Chart record in the local database
+  
+  d. CREATE A SUPERSET DASHBOARD:
+     1. Create the dashboard via Superset API
+     2. Build a grid layout with ROW/COLUMN/CHART positions
+     3. Link all charts to the dashboard
+  
+  Result: Superset dashboard ready with all charts
+  Status: "superset_ready"
+
+STEP 6: RAG EMBEDDING
+──────────────────────
+  Builds the knowledge base for the RAG chatbot:
+  
+  a. Create text chunks from:
+     - Data summary from AI analysis
+     - Column descriptions (name, type, role, reason)
+     - Sample data rows from the warehouse (up to 200 rows, batched in groups
+       of 25 for efficiency)
+  
+  b. For each chunk:
+     - Call Gemini Embedding API (model: gemini-embedding-001)
+     - Get a 3072-dimensional vector
+     - Store in chunk_embeddings table
+     - Rate-limited: pauses every 5 requests to avoid API quotas
+  
+  Result: Embedding vectors stored for similarity search
+  Status: Pipeline complete
+
+================================================================================
+  7. RAG CHATBOT — HOW IT WORKS
+================================================================================
+
+When the user sends a message on the Chat page, here is the full flow:
+
+  1. EMBED THE QUERY
+     - User's question is embedded using Gemini Embedding API
+       (task_type: "retrieval_query")
+
+  2. RETRIEVE RELEVANT CHUNKS
+     - All chunk_embeddings for this dataset are loaded
+     - Cosine similarity is computed between the query vector and each
+       stored embedding (pure Python implementation)
+     - Top 8 most similar chunks are selected
+
+  3. DETECT INTENT
+     The RAG engine classifies the user's message into one of three intents:
+     
+     a. CHART MODIFICATION: "change the bar chart to pie"
+        - Detects keywords like "change", "convert", "switch"
+        - Matches the target chart by title (substring or word overlap)
+        - Updates the Superset chart's viz_type via API
+        - Returns confirmation to the user
+     
+     b. CHART CREATION: "show me a bar chart of sales by region"
+        - Detects keywords like "chart", "graph", "visualize"
+        - Generates SQL via Gemini (using the schema context)
+        - Executes the SQL against the warehouse
+        - Builds a native Chart.js-compatible data structure
+        - Also creates a persistent Superset chart and adds it to dashboard
+     
+     c. DATA QUESTION: "what is the total revenue?"
+        - No chart-related keywords detected
+        - Falls through to the grounded answer step
+
+  4. GENERATE GROUNDED ANSWER
+     - The retrieved chunks + conversation history + data summary are sent
+       to Gemini with a prompt: "Answer using ONLY the data provided"
+     - Gemini generates a natural language answer
+     - If a chart was also created, it is appended to the response
+
+  5. RETURN RESPONSE
+     The response includes:
+     - answer: The AI-generated natural language answer
+     - sql_generated: The SQL query (if any was generated)
+     - chart_data: Chart.js-compatible data for rendering inline
+     - new_chart_id: Superset chart ID (if created)
+     - sources: Snippets from the retrieved chunks
+
+================================================================================
+  8. FRONTEND — PAGE-BY-PAGE FLOW
+================================================================================
+
+A. LOGIN PAGE  (/login)
+   - Email + password form
+   - Calls POST /api/auth/login
+   - On success: stores JWT in localStorage, redirects to /overview
+
+B. REGISTER PAGE  (/register)
+   - Email + password + full name form
+   - Calls POST /api/auth/register, then auto-logins
+   - Redirects to /overview
+
+C. OVERVIEW PAGE  (/overview)
+   - Shows stats cards (total datasets, charts, ready dashboards)
+   - Lists all user's datasets with status badges
+   - Click a dataset → goes to pipeline or dashboard page
+
+D. DATA SOURCE PAGE  (/data-source)
+   - Two modes toggled by a switch:
+     
+     UPLOAD MODE:
+     - Drag & drop zone for CSV/Excel/SQL files
+     - On file drop → POST /api/ingest/upload (multipart)
+     - Returns immediately with 202 Accepted
+     - Redirects to Pipeline page to watch progress
+     
+     CONNECT MODE:
+     - Form to enter database credentials
+     - Supports: PostgreSQL, MySQL, Snowflake, Firebase
+     - "Test Connection" button → POST /api/connect/test
+     - "Connect" button → POST /api/connect/connect
+     - Redirects to Pipeline page
+
+E. PIPELINE PAGE  (/pipeline/:datasetId)
+   - Shows a step-by-step progress tracker for the 6-step pipeline
+   - Polls GET /api/pipeline/{dataset_id} every 2 seconds
+   - Each step shows: label, status (pending/running/done/error), detail
+   - Steps:
+     1. Data Ingestion
+     2. Schema Extraction
+     3. Gemini AI Schema Analysis
+     4. AI Data Selection
+     5. Superset Chart Generation
+     6. RAG Embedding
+   - On completion → shows "View Dashboard" button
+
+F. DASHBOARD PAGE  (/dashboard/:datasetId)
+   - Renders charts natively using Chart.js (not Superset iframes)
+   - Calls GET /api/dashboard/{dataset_id}/chart-data
+   - Supports chart types: bar, line, pie, scatter, table, big_number
+   - Each chart card shows: title, AI reasoning, the rendered visualization
+   - Also provides a link to the Superset dashboard if needed
+
+G. CHAT PAGE  (/chat/:datasetId)
+   - Full RAG chatbot interface
+   - Text input at the bottom, chat history scrolling above
+   - Each message is sent via POST /api/chat/query
+   - Response can include:
+     - Text answer
+     - Inline chart (rendered with Chart.js)
+     - Chart modification confirmation
+   - Chat history is maintained in component state and sent with each request
+
+================================================================================
+  9. API ENDPOINTS — COMPLETE REFERENCE
+================================================================================
+
+All endpoints (except /api/auth/*) require:
+  Header: Authorization: Bearer <JWT token>
+
+AUTHENTICATION
+  POST   /api/auth/register         Register a new account
+  POST   /api/auth/login            Login, returns JWT
+  GET    /api/auth/me               Get current user profile
+
+DATA INGESTION
+  POST   /api/ingest/upload         Upload CSV/Excel/SQL (multipart/form-data)
+  GET    /api/ingest/datasets       List user's datasets
+  GET    /api/ingest/datasets/{id}  Get a single dataset
+
+DATABASE CONNECTION
+  POST   /api/connect/test          Test external DB connectivity
+  POST   /api/connect/connect       Connect DB + start pipeline
+
+PIPELINE
+  GET    /api/pipeline/{id}         Get pipeline status + step details
+
+DASHBOARDS
+  GET    /api/dashboard/            List all ready dashboards
+  GET    /api/dashboard/{id}/embed-token     Get Superset guest token
+  GET    /api/dashboard/{id}/superset-view   Auto-login Superset redirect
+  GET    /api/dashboard/{id}/chart-data      Get native Chart.js data
+
+CHATBOT
+  POST   /api/chat/query            Send a question to the RAG chatbot
+  POST   /api/chat/modify-chart     Modify an existing chart
+
+HEALTH
+  GET    /api/health                Health check
+
+================================================================================
+  10. AI SERVICES — GEMINI & GROQ
+================================================================================
+
+The project supports two AI providers with automatic failover:
+
+PRIMARY: Google Gemini
+  - Model: gemini-2.0-flash (configurable)
+  - Embedding Model: gemini-embedding-001 (3072 dimensions)
+  - Used for: schema analysis, SQL generation, RAG answers, embeddings
+
+FALLBACK: Groq (via HTTP API)
+  - Model: llama-3.3-70b-versatile
+  - Activated when USE_GROQ=True in environment
+  - Used for: text generation only (not embeddings)
+  - Embeddings ALWAYS use Gemini regardless of the USE_GROQ flag
+
+RETRY LOGIC:
+  - Text generation: 3 retries with exponential backoff (2s, 4s, 8s)
+  - Embeddings: 5 retries with linear backoff (2s, 4s, 6s, 8s, 10s)
+  - Automatic failover from Gemini → Groq on quota exhaustion
+
+================================================================================
+  11. DOCKER COMPOSE — SERVICES
+================================================================================
+
+5 services are orchestrated by docker-compose.yml:
+
+  SERVICE     │ IMAGE                    │ PORT  │ DEPENDS ON
+  ────────────┼──────────────────────────┼───────┼───────────────────
+  postgres    │ postgres:16-alpine       │ 5432  │ -
+  redis       │ redis:7-alpine           │ 6379  │ -
+  superset    │ apache/superset:3.1.1    │ 8088  │ postgres, redis
+  backend     │ ./backend/Dockerfile     │ 8000  │ postgres, superset
+  frontend    │ ./frontend/Dockerfile    │ 80    │ backend
+
+Startup Order:
+  1. PostgreSQL starts + runs init_db.sql (creates 3 databases)
+  2. Redis starts
+  3. Superset starts, runs migrations, creates admin user, initializes
+  4. Backend starts, creates tables in datapilot + datapilot_auth
+  5. Frontend starts (built with Vite, served by nginx)
+
+Volumes:
+  - postgres_data: persistent PostgreSQL data
+  - upload_data: uploaded files (/tmp/datapilot/uploads)
+
+================================================================================
+  12. SUPERSET INTEGRATION — DETAILED
+================================================================================
+
+Superset is configured with these key features:
+
+  FEATURE FLAGS (in superset_config.py):
+  - EMBEDDED_SUPERSET: True       → enables iframe embedding
+  - GENERIC_CHART_AXES: True      → allows line/area charts with non-date x-axis
+  - DASHBOARD_NATIVE_FILTERS: True
+  - DASHBOARD_CROSS_FILTERS: True
+
+  SECURITY:
+  - CSRF disabled (WTF_CSRF_ENABLED = False)
+  - X-Frame-Options: ALLOWALL (for iframe embedding)
+  - CORS: allow all origins
+  - Public role enabled with Gamma-like permissions
+
+  GUEST TOKENS:
+  - For dashboard embedding, the backend generates short-lived guest tokens
+  - Process: Login to Superset API → get dashboard UUID → request guest token
+  - Three strategies to find dashboard UUID:
+    1. Individual detail endpoint
+    2. List all dashboards and filter
+    3. Direct SQL query to Superset's database
+
+  VIZ TYPE MAPPING (what the pipeline creates):
+  ┌────────────────┬──────────────────────────┬─────────────────────────────┐
+  │ AI Chart Type  │ Date X-Axis              │ Categorical X-Axis          │
+  ├────────────────┼──────────────────────────┼─────────────────────────────┤
+  │ bar            │ echarts_timeseries_bar   │ dist_bar                    │
+  │ line           │ echarts_timeseries_line  │ dist_bar (fallback)         │
+  │ area           │ echarts_timeseries       │ dist_bar (fallback)         │
+  │ pie            │ pie                      │ pie                         │
+  │ scatter        │ echarts_scatter          │ echarts_scatter             │
+  │ big_number     │ big_number_total         │ big_number_total            │
+  │ table          │ table                    │ table                       │
+  └────────────────┴──────────────────────────┴─────────────────────────────┘
+
+================================================================================
+  13. ENVIRONMENT VARIABLES
+================================================================================
+
+ROOT (.env):
+  GEMINI_API_KEY             Google AI Studio key (required)
+  GROQ_API_KEY               Groq API key (optional fallback)
+  GROQ_MODEL                 Groq model name (default: llama-3.3-70b-versatile)
+  SECRET_KEY                 JWT signing secret (32+ chars)
+  SUPERSET_SECRET_KEY        Superset's own secret key
+  POSTGRES_USER/PASSWORD/DB  PostgreSQL credentials
+  SUPERSET_ADMIN_USER/PASS   Superset admin login
+
+BACKEND (via docker-compose environment):
+  DATABASE_URL               Async PostgreSQL connection string (asyncpg)
+  AUTH_DATABASE_URL           Auth database connection string
+  SUPERSET_BASE_URL          Internal Superset URL (http://superset:8088)
+  SUPERSET_PUBLIC_URL        External Superset URL (http://localhost)
+  GEMINI_MODEL               AI model name (default: gemini-2.0-flash)
+  GEMINI_EMBEDDING_MODEL     Embedding model (default: models/gemini-embedding-001)
+  USE_GROQ                   Enable Groq fallback (True/False)
+  CORS_ORIGINS               Allowed frontend origins (JSON array)
+
+FRONTEND (build-time via Vite):
+  VITE_API_BASE_URL          Backend API URL (http://localhost:8000)
+  VITE_SUPERSET_URL          Superset URL (http://localhost:8088)
+
+================================================================================
+  14. KEY DESIGN DECISIONS
+================================================================================
+
+  1. NO DEFAULT CHARTS
+     Charts are only generated after Gemini AI analysis. If the AI determines
+     the data has no meaningful patterns (is_valid_for_analytics: false), the
+     pipeline halts and no dashboard is created.
+
+  2. TWO EXCLUSIVE INPUT MODES
+     Upload (files) and Connect (databases) are separate, independent paths.
+     Both funnel into the same 6-step AI pipeline.
+
+  3. 100% RAG CHATBOT
+     The chatbot never uses hardcoded or template answers. Every response:
+     - Embeds the query with Gemini
+     - Retrieves relevant data chunks via cosine similarity
+     - Generates a grounded answer using only the retrieved context
+
+  4. PER-USER DATA ISOLATION
+     Each user only sees their own datasets, charts, and dashboards.
+     Superset dashboards are accessed via short-lived guest tokens.
+
+  5. AGGREGATION SAFETY
+     The pipeline verifies column types at multiple levels:
+     - AI prompt instructs numeric-only aggregations
+     - Python code checks the schema type mapping
+     - Extra safety queries PostgreSQL information_schema
+     This prevents "AVG on TEXT column" errors.
+
+  6. DUAL AI PROVIDER STRATEGY
+     Gemini is primary; Groq (Llama 3.3) is the fallback. Embeddings always
+     use Gemini since Groq doesn't offer an embedding API.
+
+  7. NATIVE CHART RENDERING
+     The dashboard page uses Chart.js to render charts natively in the
+     browser, rather than relying solely on Superset iframe embedding.
+     This provides faster loading and better UI integration.
+
+  8. BACKGROUND PIPELINE
+     The entire AI pipeline runs as a FastAPI BackgroundTask, so the upload
+     API returns immediately (202 Accepted). The frontend polls for status.
+
+================================================================================
+  15. COMPLETE USER JOURNEY — END TO END
+================================================================================
+
+  1. User opens http://localhost → sees Login page
+  2. User clicks "Create Account" → fills form → account created
+  3. User lands on Overview page (empty — no datasets yet)
+  4. User navigates to "Data Source" page
+  5. User drags a CSV file into the upload zone
+  6. Backend saves the file, creates a Dataset record, returns 202
+  7. Frontend redirects to Pipeline page
+  8. Pipeline runs in background:
+     a. Pandas reads CSV → bulk inserts into PostgreSQL as "ds_{uuid}"
+     b. Schema extracted: column names, types, sample values
+     c. Schema sent to Gemini AI → AI returns column classifications + charts
+     d. AI selections validated (≥1 column, ≥1 chart)
+     e. Charts created in Superset → dashboard assembled
+     f. RAG embeddings built for chatbot
+  9. Frontend shows each step completing in real-time (polling every 2s)
+  10. Pipeline completes → "View Dashboard" button appears
+  11. User clicks → sees Dashboard page with Chart.js-rendered charts
+  12. User navigates to Chat page
+  13. User asks: "What are the top 5 categories by revenue?"
+  14. RAG engine:
+      a. Embeds the question
+      b. Finds relevant data chunks
+      c. Detects "chart creation" intent
+      d. Generates SQL via Gemini
+      e. Executes SQL, builds chart data
+      f. Creates Superset chart + adds to dashboard
+      g. Returns answer + inline chart
+  15. User sees the answer with a chart rendered below it
+  16. User asks: "Change that bar chart to a pie chart"
+  17. RAG engine detects "chart modification" intent
+  18. Updates the Superset chart viz_type → confirms to user
+  19. Dashboard page now reflects the updated chart type
+
+================================================================================
+  END OF DOCUMENT
+================================================================================
